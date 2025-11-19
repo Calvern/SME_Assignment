@@ -1021,7 +1021,6 @@ class EntityRegistry(BaseRegistry):
             return config_entry.entry_id
         return UNDEFINED
 
-
     def _restore_or_initialize_entity_data(
         self,
         domain: str,
@@ -1050,7 +1049,6 @@ class EntityRegistry(BaseRegistry):
         else:
             # Initialize with default values for new entity
             return self._initialize_new_entity_data(get_initial_options, created_at)
-
 
     def _restore_deleted_entity_data(
         self,
@@ -1107,7 +1105,6 @@ class EntityRegistry(BaseRegistry):
         
         return entity_data
 
-
     def _initialize_new_entity_data(
         self,
         get_initial_options: Callable[[], EntityOptionsType | None] | None,
@@ -1133,7 +1130,6 @@ class EntityRegistry(BaseRegistry):
             "entity_id": None,
             "options": get_initial_options() if get_initial_options else None,
         }
-
 
     def _adjust_disabled_by_for_config_entry(
         self,
@@ -1163,7 +1159,6 @@ class EntityRegistry(BaseRegistry):
         
         return disabled_by
 
-
     def _apply_integration_disable_preference(
         self,
         disabled_by: RegistryEntryDisabler | None,
@@ -1184,7 +1179,6 @@ class EntityRegistry(BaseRegistry):
             return RegistryEntryDisabler.INTEGRATION
         
         return disabled_by
-
 
     def _create_and_register_entity(
         self,
