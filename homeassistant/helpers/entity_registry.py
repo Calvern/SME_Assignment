@@ -1263,9 +1263,37 @@ class EntityRegistry(BaseRegistry):
         translation_key: str | None | UndefinedType = UNDEFINED,
         unit_of_measurement: str | None | UndefinedType = UNDEFINED,
     ) -> RegistryEntry:
-        """Private facing update properties method."""
+        """Private method to update properties of an entity."""
         old = self.entities[entity_id]
 
+        new_values, old_values = self._collect_changed_attributes(
+        old,
+        aliases=aliases,
+        area_id=area_id,
+        categories=categories,
+        capabilities=capabilities,
+        config_entry_id=config_entry_id,
+        config_subentry_id=config_subentry_id,
+        device_class=device_class,
+        device_id=device_id,
+        disabled_by=disabled_by,
+        entity_category=entity_category,
+        hidden_by=hidden_by,
+        icon=icon,
+        has_entity_name=has_entity_name,
+        labels=labels,
+        name=name,
+        options=options,
+        original_device_class=original_device_class,
+        original_icon=original_icon,
+        original_name=original_name,
+        platform=platform,
+        supported_features=supported_features,
+        translation_key=translation_key,
+        unit_of_measurement=unit_of_measurement,
+        )
+
+        # Collect new values
         new_values: dict[str, Any] = {}  # Dict with new key/value pairs
         old_values: dict[str, Any] = {}  # Dict with old key/value pairs
 
@@ -1378,6 +1406,28 @@ class EntityRegistry(BaseRegistry):
         self.hass.bus.async_fire_internal(EVENT_ENTITY_REGISTRY_UPDATED, data)
 
         return new
+    
+    def _collect_changed_attributes(
+    self,
+    old: RegistryEntry,
+    **kwargs: Any,
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        """
+        Collect attribute changes by comparing new values with existing entity.
+        
+        Returns tuple of (new_values, old_values) dicts containing only changed attributes.
+        """
+        new_values: dict[str, Any] = {}
+        old_values: dict[str, Any] = {}
+
+        # Iterate through all provided attributes
+        for attr_name, value in kwargs.items():
+            # Skip undefined values and values that haven't changed
+            if value is not UNDEFINED and value != getattr(old, attr_name):
+                new_values[attr_name] = value
+                old_values[attr_name] = getattr(old, attr_name)
+
+        return new_values, old_values
 
     @callback
     def async_update_entity(
