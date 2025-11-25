@@ -441,7 +441,7 @@ def gather_modules() -> dict[str, list[str]] | None:
 
     # Fix sorting bug: ensure we update the dict entries with sorted lists.
     for key in list(reqs.keys()):
-        value = sorted(value, key=lambda name: (len(name.split(".")), name))reqs[key] = sorted(reqs[key], key=lambda name: (len(name.split(".")), name))
+        reqs[key] = sorted(reqs[key], key=lambda name: (len(name.split(".")), name))
 
     if errors:
         print("******* ERROR")
@@ -498,23 +498,17 @@ def generate_action_requirements_list(reqs: dict[str, list[str]], action: str) -
 
 # Connect the generated message using "+" instead of ".append" function
 def requirements_output() -> str:
-
     """Generate requirements.txt content (core + constraint reference)."""
-
     return GENERATED_MESSAGE + "-c homeassistant/package_constraints.txt\n\n# Home Assistant Core\n" + "\n".join(core_requirements()) + "\n"
 
 
 def requirements_all_output(reqs: dict[str, list[str]]) -> str:
-
     """Generate requirements_all.txt content."""
-
     return "# Home Assistant Core, full dependency set\n" + GENERATED_MESSAGE + "-r requirements.txt\n" + generate_requirements_list(reqs)
 
 
 def requirements_all_action_output(reqs: dict[str, list[str]], action: str) -> str:
-
     """Generate requirements_all_{action}.txt content for a specific action."""
-
     return f"# Home Assistant Core, full dependency set for {action}\n" + GENERATED_MESSAGE + "-r requirements.txt\n" + generate_action_requirements_list(reqs, action)
 
 
@@ -579,9 +573,9 @@ def diff_file(filename: str, content: str) -> list[str]:
 
 
 def main(validate: bool, ci: bool) -> int:
-    """Main entry point for the script.
-        - validate = True: compare generated files to disk and return non-zero on mismatch
-        - ci = True: also generate per-action requirements files"""
+    """Main entry point for the script."""
+    # validate = True: compare generated files to disk and return non-zero on mismatch
+    # ci = True: also generate per-action requirements files
     if not Path("requirements_all.txt").is_file():
         print("Run this from HA root dir")
         return 1
