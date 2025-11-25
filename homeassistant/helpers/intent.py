@@ -576,7 +576,7 @@ def async_match_targets(  # noqa: C901
 
         return MatchTargetsResult(True, states=[c.state for c in candidates])
 
-    
+    _populate_candidate_metadata(hass, candidates)##一次补全##
 
     if constraints.name:
         # Filter by entity name or alias
@@ -653,11 +653,35 @@ def async_match_targets(  # noqa: C901
         floors=targeted_floors or [],
     )
 
+
+
+def _populate_candidate_metadata(hass: HomeAssistant, candidates: list[MatchTargetsCandidate]):
+    """“Populate candidate devices’ entity, device, and area metadata all at once to avoid repeated operation”"""
+    entity_registry = entity_registry.async_get(hass)
+    device_registry = device_registry.async_get(hass)
+    area_registry = area_registry.async_get(hass)
+
+    for candidate in candidates:
+        # Populate entity registration information
+        candidate.entity = entity_registry.async_get(candidate.state.entity_id)
+        if not candidate.entity:
+            continue
+
+        # Populate device information 
+        if candidate.entity.device_id:
+            candidate.device = device_registry.async_get(candidate.entity.device_id)
+
+        # Populate area information 
+        if candidate.entity.area_id:
+            candidate.area = area_registry.async_get_area(candidate.entity.area_id)
+        elif candidate.device and candidate.device.area_id:
+            candidate.area = area_registry.async_get_area(candidate.device.area_id)
+
 def _filter_candidates_by_domain(
     candidates: list[MatchTargetsCandidate],
     domains: list[str] | None,
 ) -> tuple[list[MatchTargetsCandidate], bool]:
-    """按设备域筛选候选设备（如light、switch）"""
+    """Filter by domain"""
     if not domains:
         return candidates, False
     filtered = [c for c in candidates if c.state.domain in domains]
@@ -667,7 +691,7 @@ def _filter_candidates_by_state(
     candidates: list[MatchTargetsCandidate],
     states: list[str] | None,
 ) -> list[MatchTargetsCandidate]:
-    """按设备状态筛选（如on、off）"""
+    """Filter by device state"""
     if not states:
         return candidates
     return [c for c in candidates if c.state.state in states]
@@ -678,7 +702,7 @@ def _filter_candidates_by_floor(
     floor_name: str | None,
     area_candidate_filter: Callable[[MatchTargetsCandidate, Collection[str]], bool],
 ) -> tuple[list[MatchTargetsCandidate], list[floor_registry.FloorEntry] | None, MatchTargetsResult | None]:
-    """按楼层筛选候选设备（原嵌套逻辑迁移）"""
+    """Filter candidates based on floor"""
     if not floor_name:
         return candidates, None, None
     fr = floor_registry.async_get(hass)
@@ -702,7 +726,7 @@ def _filter_candidates_by_area(
     possible_area_ids: Collection[str],
     area_candidate_filter: Callable[[MatchTargetsCandidate, Collection[str]], bool],
 ) -> tuple[list[MatchTargetsCandidate], list[area_registry.AreaEntry] | None, MatchTargetsResult | None]:
-    """按区域筛选候选设备（原嵌套逻辑迁移）"""
+    """Filter candidate devices by area"""
     if not area_name:
         return candidates, None, None
     ar = area_registry.async_get(hass)
@@ -722,7 +746,7 @@ def _disambiguate_duplicate_names(
     preferences: MatchTargetsPreferences,
     area_candidate_filter: Callable[[MatchTargetsCandidate, Collection[str]], bool],
 ) -> tuple[list[MatchTargetsCandidate], MatchTargetsResult | None]:
-    """重名设备去重（原嵌套逻辑迁移）"""
+    """Resolve duplicate device names"""
     sorted_candidates = sorted(
         [c for c in candidates if c.matched_name],
         key=lambda c: c.matched_name or "",
@@ -733,7 +757,7 @@ def _disambiguate_duplicate_names(
         if len(group_candidates) < 2:
             final_candidates.extend(group_candidates)
             continue
-        # 按偏好去重
+        # Filter duplicates according to user preferences
         if preferences.floor_id:
             group_candidates = [
                 c for c in group_candidates
@@ -750,7 +774,7 @@ def _disambiguate_duplicate_names(
             if len(group_candidates) < 2:
                 final_candidates.extend(group_candidates)
                 continue
-        # 无法去重
+        # cannot duplicates
         return [], MatchTargetsResult(
             False, MatchFailedReason.DUPLICATE_NAME, no_match_name=name
         )
@@ -762,7 +786,7 @@ def _enforce_single_target(
     preferences: MatchTargetsPreferences,
     area_candidate_filter: Callable[[MatchTargetsCandidate, Collection[str]], bool],
 ) -> tuple[list[MatchTargetsCandidate], MatchTargetsResult | None]:
-    """校验单目标约束（原嵌套逻辑迁移）"""
+    """（Validate single-target constraint"""
     if len(candidates) == 1:
         return candidates, None
     if not (preferences.area_id or preferences.floor_id):
