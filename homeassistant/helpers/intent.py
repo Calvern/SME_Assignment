@@ -528,6 +528,9 @@ def async_match_targets(  # noqa: C901
     ] = _default_area_candidate_filter,
 ) -> MatchTargetsResult:
     """Match entities based on constraints in order to handle an intent."""
+    """1. Initialize candidates → 2. Filter by domain → 3. Filter by state → 4. Early-exit check → 5. Populate metadata →
+6. Filter by name → 7. Filter by features → 8. Filter by device classes → 9. Filter by floor → 10. Filter by area →
+11. Exposure check → 12. Deduplicate by name → 13. Enforce single-target constraint → 14. Return result"""
     preferences = preferences or MatchTargetsPreferences()
     filtered_by_domain = False
 
