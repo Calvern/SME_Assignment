@@ -1049,37 +1049,13 @@ class DeviceRegistry(BaseRegistry[dict[str, list[dict[str, Any]]]]):
         """
         old = self.devices[device_id]
 
-        new_values: dict[str, Any] = {}  # Dict with new key/value pairs
-        old_values: dict[str, Any] = {}  # Dict with old key/value pairs
+        new_values: dict[str, Any] = {}
+        old_values: dict[str, Any] = {}
 
         config_entries = old.config_entries
         config_entries_subentries = old.config_entries_subentries
 
-        if add_config_entry_id is not UNDEFINED:
-            if (
-                add_config_entry := self.hass.config_entries.async_get_entry(
-                    add_config_entry_id
-                )
-            ) is None:
-                raise HomeAssistantError(
-                    f"Can't link device to unknown config entry {add_config_entry_id}"
-                )
-
-        if add_config_subentry_id is not UNDEFINED:
-            if add_config_entry_id is UNDEFINED:
-                raise HomeAssistantError(
-                    "Can't add config subentry without specifying config entry"
-                )
-            if (
-                add_config_subentry_id
-                # mypy says add_config_entry can be None. That's impossible, because we
-                # raise above if that happens
-                and add_config_subentry_id not in add_config_entry.subentries  # type: ignore[union-attr]
-            ):
-                raise HomeAssistantError(
-                    f"Config entry {add_config_entry_id} has no subentry {add_config_subentry_id}"
-                )
-
+        # Basic validation of parameters that must be consistent
         if (
             remove_config_subentry_id is not UNDEFINED
             and remove_config_entry_id is UNDEFINED
@@ -1103,100 +1079,42 @@ class DeviceRegistry(BaseRegistry[dict[str, list[dict[str, Any]]]]):
                 "Cannot define both merge_identifiers and new_identifiers"
             )
 
+        # Process adding a config entry (if provided)
         if add_config_entry_id is not UNDEFINED:
-            if add_config_subentry_id is UNDEFINED:
-                # Interpret not specifying a subentry as None (the main entry)
-                add_config_subentry_id = None
+            (
+                config_entries,
+                config_entries_subentries,
+                new_vals_add,
+                old_vals_add,
+            ) = self._process_add_config_entry(
+                old, add_config_entry_id, add_config_subentry_id, device_info_type
+            )
+            new_values.update(new_vals_add)
+            old_values.update(old_vals_add)
 
-            primary_entry_id = old.primary_config_entry
-            if (
-                device_info_type == "primary"
-                and add_config_entry_id != primary_entry_id
-            ):
-                if (
-                    primary_entry_id is None
-                    or not (
-                        primary_entry := self.hass.config_entries.async_get_entry(
-                            primary_entry_id
-                        )
-                    )
-                    or primary_entry.domain in LOW_PRIO_CONFIG_ENTRY_DOMAINS
-                ):
-                    new_values["primary_config_entry"] = add_config_entry_id
-                    old_values["primary_config_entry"] = primary_entry_id
-
-            if add_config_entry_id not in old.config_entries:
-                config_entries = old.config_entries | {add_config_entry_id}
-                config_entries_subentries = old.config_entries_subentries | {
-                    add_config_entry_id: {add_config_subentry_id}
-                }
-                # Enable the device if it was disabled by config entry and we're adding
-                # a non disabled config entry
-                if (
-                    # mypy says add_config_entry can be None. That's impossible, because we
-                    # raise above if that happens
-                    not add_config_entry.disabled_by  # type: ignore[union-attr]
-                    and old.disabled_by is DeviceEntryDisabler.CONFIG_ENTRY
-                ):
-                    new_values["disabled_by"] = None
-                    old_values["disabled_by"] = old.disabled_by
-            elif (
-                add_config_subentry_id
-                not in old.config_entries_subentries[add_config_entry_id]
-            ):
-                config_entries_subentries = old.config_entries_subentries | {
-                    add_config_entry_id: old.config_entries_subentries[
-                        add_config_entry_id
-                    ]
-                    | {add_config_subentry_id}
-                }
-
+        # Process removing a config entry (if provided and present)
         if (
             remove_config_entry_id is not UNDEFINED
             and remove_config_entry_id in config_entries
         ):
-            if remove_config_subentry_id is UNDEFINED:
-                config_entries_subentries = dict(old.config_entries_subentries)
-                del config_entries_subentries[remove_config_entry_id]
-            elif (
-                remove_config_subentry_id
-                in old.config_entries_subentries[remove_config_entry_id]
-            ):
-                config_entries_subentries = old.config_entries_subentries | {
-                    remove_config_entry_id: old.config_entries_subentries[
-                        remove_config_entry_id
-                    ]
-                    - {remove_config_subentry_id}
-                }
-                if not config_entries_subentries[remove_config_entry_id]:
-                    del config_entries_subentries[remove_config_entry_id]
-
-            if remove_config_entry_id not in config_entries_subentries:
-                if config_entries == {remove_config_entry_id}:
-                    self.async_remove_device(device_id)
-                    return None
-
-                if remove_config_entry_id == old.primary_config_entry:
-                    new_values["primary_config_entry"] = None
-                    old_values["primary_config_entry"] = old.primary_config_entry
-
-                config_entries = config_entries - {remove_config_entry_id}
-
-                # Disable the device if it is enabled and all remaining config entries
-                # are disabled
-                has_enabled_config_entries = any(
-                    config_entry.disabled_by is None
-                    for config_entry_id in config_entries
-                    if (
-                        config_entry := self.hass.config_entries.async_get_entry(
-                            config_entry_id
-                        )
-                    )
-                    is not None
-                )
-                if not has_enabled_config_entries and old.disabled_by is None:
-                    new_values["disabled_by"] = DeviceEntryDisabler.CONFIG_ENTRY
-                    old_values["disabled_by"] = old.disabled_by
+            (
+                config_entries,
+                config_entries_subentries,
+                new_vals_rem,
+                old_vals_rem,
+            ) = self._process_remove_config_entry(
+                old,
+                remove_config_entry_id,
+                remove_config_subentry_id,
+                config_entries,
+                config_entries_subentries,
+            )
+            # If helper indicates device should be removed
+            if new_vals_rem is None:
+                self.async_remove_device(device_id)
+                return None
+            new_values.update(new_vals_rem)
+            old_values.update(old_vals_rem)
 
         if config_entries != old.config_entries:
             new_values["config_entries"] = config_entries
@@ -1206,46 +1124,28 @@ class DeviceRegistry(BaseRegistry[dict[str, list[dict[str, Any]]]]):
             new_values["config_entries_subentries"] = config_entries_subentries
             old_values["config_entries_subentries"] = old.config_entries_subentries
 
-        added_connections: set[tuple[str, str]] | None = None
-        added_identifiers: set[tuple[str, str]] | None = None
-
-        if merge_connections is not UNDEFINED:
-            normalized_connections = self._validate_connections(
-                device_id,
-                merge_connections,
-                allow_collisions,
-            )
-            old_connections = old.connections
-            if not normalized_connections.issubset(old_connections):
-                added_connections = normalized_connections
-                new_values["connections"] = old_connections | normalized_connections
-                old_values["connections"] = old_connections
-
-        if merge_identifiers is not UNDEFINED:
-            merge_identifiers = self._validate_identifiers(
-                device_id, merge_identifiers, allow_collisions
-            )
-            old_identifiers = old.identifiers
-            if not merge_identifiers.issubset(old_identifiers):
-                added_identifiers = merge_identifiers
-                new_values["identifiers"] = old_identifiers | merge_identifiers
-                old_values["identifiers"] = old_identifiers
-
-        if new_connections is not UNDEFINED:
-            added_connections = new_values["connections"] = self._validate_connections(
-                device_id, new_connections, False
-            )
-            old_values["connections"] = old.connections
-
-        if new_identifiers is not UNDEFINED:
-            added_identifiers = new_values["identifiers"] = self._validate_identifiers(
-                device_id, new_identifiers, False
-            )
-            old_values["identifiers"] = old.identifiers
+        # Process connections and identifiers via helper
+        (
+            new_conn_ident_vals,
+            old_conn_ident_vals,
+            added_connections,
+            added_identifiers,
+        ) = self._process_connection_identifier_changes(
+            old,
+            device_id,
+            merge_connections,
+            merge_identifiers,
+            new_connections,
+            new_identifiers,
+            allow_collisions,
+        )
+        new_values.update(new_conn_ident_vals)
+        old_values.update(old_conn_ident_vals)
 
         if configuration_url is not UNDEFINED:
             configuration_url = _validate_configuration_url(configuration_url)
 
+        # Process simple scalar/set attributes
         for attr_name, value in (
             ("area_id", area_id),
             ("configuration_url", configuration_url),
@@ -1283,9 +1183,7 @@ class DeviceRegistry(BaseRegistry[dict[str, list[dict[str, Any]]]]):
         new = attr.evolve(old, **new_values)
         self.devices[device_id] = new
 
-        # NOTE: Once we solve the broader issue of duplicated devices, we might
-        # want to revisit it. Instead of simply removing the duplicated deleted device,
-        # we might want to merge the information from it into the non-deleted device.
+        # Remove any deleted devices that are resurrected by added identifiers/connections
         for deleted_device in self.deleted_devices.get_entries(
             added_identifiers, added_connections
         ):
