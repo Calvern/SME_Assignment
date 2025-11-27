@@ -202,6 +202,39 @@ def _write_default_config(config_dir: str) -> bool:
         return False
     return True
 
+# Map (domain, option_key) -> guidance / replacement text
+_DEPRECATED_CONFIG_OPTIONS: dict[tuple[str, str], str] = {
+    # Example: sensor.old_option is deprecated, use sensor.new_option instead
+    ("sensor", "old_option"): "Use 'new_option' under 'sensor' instead.",
+    # Add more entries here as needed
+    # ("automation", "initial_state"): "Use 'enabled' instead of 'initial_state'.",
+}
+
+def _log_deprecated_config(
+    hass: HomeAssistant, config: dict
+) -> None:
+    """Log warnings for deprecated configuration options.
+
+    Looks up known deprecated options in the loaded configuration and emits
+    clear warnings with guidance for replacements.
+    """
+    for domain, domain_cfg in config.items():
+        # Only inspect domain configs that are mappings (most domains are)
+        if not isinstance(domain_cfg, dict):
+            continue
+
+        for key in domain_cfg:
+            replacement = _DEPRECATED_CONFIG_OPTIONS.get((domain, key))
+            if not replacement:
+                continue
+
+            _LOGGER.warning(
+                "Configuration option '%s' in '%s' is deprecated and will be "
+                "removed in a future release: %s",
+                key,
+                domain,
+                replacement,
+            )
 
 async def async_hass_config_yaml(hass: HomeAssistant) -> dict:
     """Load YAML from a Home Assistant configuration file.
@@ -257,8 +290,10 @@ async def async_hass_config_yaml(hass: HomeAssistant) -> dict:
         )
         core_config[CONF_PACKAGES] = {}
 
-    return config
+    # NEW: warn about deprecated config entries
+    _log_deprecated_config(hass, config)
 
+    return config
 
 def load_yaml_config_file(
     config_path: str, secrets: Secrets | None = None
