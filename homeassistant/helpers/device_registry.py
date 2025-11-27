@@ -9,7 +9,16 @@ from enum import StrEnum
 from functools import lru_cache
 import logging
 import time
-from typing import TYPE_CHECKING, Any, Literal, TypedDict
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Literal,
+    TypedDict,
+    TypeVar,
+    Generic,
+    Type,
+    Union,
+)
 
 import attr
 from yarl import URL
@@ -48,6 +57,14 @@ if TYPE_CHECKING:
     from . import entity_registry
 else:
     from propcache.api import under_cached_property
+
+
+# Type variables used for backward-compatible typing where
+# inline function/class type parameter syntax was previously used.
+# _EntryTypeT is constrained to either DeviceEntry or DeletedDeviceEntry.
+# _EnumT is a TypeVar bound to StrEnum used by get_optional_enum.
+_EntryTypeT = TypeVar("_EntryTypeT", "DeviceEntry", "DeletedDeviceEntry")
+_EnumT = TypeVar("_EnumT", bound=StrEnum)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -169,11 +186,11 @@ class _EventDeviceRegistryUpdatedData_Update(TypedDict):
     changes: dict[str, Any]
 
 
-type EventDeviceRegistryUpdatedData = (
-    _EventDeviceRegistryUpdatedData_Create
-    | _EventDeviceRegistryUpdatedData_Remove
-    | _EventDeviceRegistryUpdatedData_Update
-)
+EventDeviceRegistryUpdatedData = Union[
+    _EventDeviceRegistryUpdatedData_Create,
+    _EventDeviceRegistryUpdatedData_Remove,
+    _EventDeviceRegistryUpdatedData_Update,
+]
 
 
 class DeviceEntryType(StrEnum):
@@ -423,7 +440,7 @@ class DeviceEntry:
         return None
 
     @under_cached_property
-    def as_storage_fragment(self) -> json_fragment:
+    def as_storage_fragment(self) -> Any:
         # Storage-specific representation used when persisting the registry.
         """Return a json fragment for storage."""
         return json_fragment(
@@ -523,7 +540,7 @@ class DeletedDeviceEntry:
         )
 
     @under_cached_property
-    def as_storage_fragment(self) -> json_fragment:
+    def as_storage_fragment(self) -> Any:
         """Return a json fragment for storage."""
         return json_fragment(
             json_bytes(
@@ -655,9 +672,13 @@ class DeviceRegistryStore(storage.Store[dict[str, list[dict[str, Any]]]]):
         return old_data
 
 
-class DeviceRegistryItems[_EntryTypeT: (DeviceEntry, DeletedDeviceEntry)](
-    BaseRegistryItems[_EntryTypeT]
-):
+class DeviceRegistryItems(BaseRegistryItems[_EntryTypeT], Generic[_EntryTypeT]):
+    """Container for device registry items, maps device id -> entry.
+
+    Maintains two additional indexes:
+    - (connection_type, connection identifier) -> entry
+    - (DOMAIN, identifier) -> entry
+    """
     """Container for device registry items, maps device id -> entry.
 
     Maintains two additional indexes:
@@ -1535,8 +1556,8 @@ class DeviceRegistry(BaseRegistry[dict[str, list[dict[str, Any]]]]):
                 )
 
             # Introduced in 0.111
-            def get_optional_enum[_EnumT: StrEnum](
-                cls: type[_EnumT], value: str | None, undefined: bool
+            def get_optional_enum(
+                cls: Type[_EnumT], value: str | None, undefined: bool
             ) -> _EnumT | UndefinedType | None:
                 """Convert string to the passed enum, UNDEFINED or None."""
                 if undefined:
