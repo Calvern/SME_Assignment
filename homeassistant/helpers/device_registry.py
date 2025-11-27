@@ -222,7 +222,10 @@ class DeviceConnectionCollisionError(DeviceCollisionError):
             f"already registered with {existing_device}"
         )
 
-
+# Validate and classify a DeviceInfo mapping. Returns the detected
+# device_info_type (one of 'link', 'primary', 'secondary'). Raises
+# DeviceInfoError when the supplied mapping does not provide required
+# information or contains unsupported keys.
 def _validate_device_info(
     config_entry: ConfigEntry,
     device_info: DeviceInfo,
@@ -264,6 +267,9 @@ _cached_parse_url = lru_cache(maxsize=512)(URL)
 
 
 def _validate_configuration_url(value: Any) -> str | None:
+    # Validate `configuration_url` is a supported URL with scheme and host.
+    # Returns the string form of the URL or None when input is None.
+    # Raises ValueError on invalid scheme/host.
     """Validate and convert configuration_url."""
     if value is None:
         return None
@@ -279,6 +285,8 @@ def _validate_configuration_url(value: Any) -> str | None:
 
 @lru_cache(maxsize=512)
 def format_mac(mac: str) -> str:
+    # Normalize MAC addresses into lower-case colon-separated form.
+    # Accepts common formats (aa:bb:cc:dd:ee:ff, aabb.ccdd.eeff, aabbccddeeff).
     """Format the mac address string for entry into dev reg."""
     to_test = mac
 
@@ -301,6 +309,8 @@ def format_mac(mac: str) -> str:
 def _normalize_connections(
     connections: Iterable[tuple[str, str]],
 ) -> set[tuple[str, str]]:
+    # Normalize a sequence of (connection_type, identifier) tuples.
+    # For MAC connections the identifier is normalized via format_mac.
     """Normalize connections to ensure we can match mac addresses."""
     return {
         (key, format_mac(value)) if key == CONNECTION_NETWORK_MAC else (key, value)
@@ -314,6 +324,8 @@ def _normalize_connections_validator(
     connections: Iterable[tuple[str, str]],
 ) -> None:
     """Check connections normalization used as attrs validator."""
+    # attrs validator used by DeviceEntry to ensure stored connections
+    # already have canonical MAC formatting when key == CONNECTION_NETWORK_MAC.
     for key, value in connections:
         if key == CONNECTION_NETWORK_MAC and format_mac(value) != value:
             raise ValueError(f"Invalid mac address format: {value}")
@@ -352,11 +364,14 @@ class DeviceEntry:
     _cache: dict[str, Any] = attr.ib(factory=dict, eq=False, init=False)
 
     @property
+    # True when the device has any disabler set (user, integration, config_entry)
     def disabled(self) -> bool:
         """Return if entry is disabled."""
         return self.disabled_by is not None
 
     @property
+    # Convert the DeviceEntry into a JSON-serializable dict used in events
+    # and external presentation (e.g., websocket responses).
     def dict_repr(self) -> dict[str, Any]:
         """Return a dict representation of the entry."""
         # Convert sets and tuples to lists
@@ -392,6 +407,7 @@ class DeviceEntry:
 
     @under_cached_property
     def json_repr(self) -> bytes | None:
+        # Cached JSON bytes used for efficient storage and cache comparisons.
         """Return a cached JSON representation of the entry."""
         try:
             dict_repr = self.dict_repr
@@ -408,6 +424,7 @@ class DeviceEntry:
 
     @under_cached_property
     def as_storage_fragment(self) -> json_fragment:
+        # Storage-specific representation used when persisting the registry.
         """Return a json fragment for storage."""
         return json_fragment(
             json_bytes(
@@ -539,6 +556,8 @@ class DeletedDeviceEntry:
 class DeviceRegistryStore(storage.Store[dict[str, list[dict[str, Any]]]]):
     """Store entity registry data."""
 
+    # Migration routine for persisted device registry data. Responsible for
+    # upgrading data from older storage minor versions to the current format.
     async def _async_migrate_func(  # noqa: C901
         self,
         old_major_version: int,
@@ -653,6 +672,7 @@ class DeviceRegistryItems[_EntryTypeT: (DeviceEntry, DeletedDeviceEntry)](
         self._identifiers: dict[tuple[str, str], _EntryTypeT] = {}
 
     def _index_entry(self, key: str, entry: _EntryTypeT) -> None:
+        # Index connections and identifiers for fast lookup by those values.
         """Index an entry."""
         for connection in entry.connections:
             self._connections[connection] = entry
@@ -662,6 +682,8 @@ class DeviceRegistryItems[_EntryTypeT: (DeviceEntry, DeletedDeviceEntry)](
     def _unindex_entry(
         self, key: str, replacement_entry: _EntryTypeT | None = None
     ) -> None:
+        # Remove the entry from connection/identifier indexes when deleted
+        # or replaced.
         """Unindex an entry."""
         old_entry = self.data[key]
         for connection in old_entry.connections:
@@ -676,6 +698,7 @@ class DeviceRegistryItems[_EntryTypeT: (DeviceEntry, DeletedDeviceEntry)](
         identifiers: set[tuple[str, str]] | None = None,
         connections: set[tuple[str, str]] | None = None,
     ) -> _EntryTypeT | None:
+        # Lookup an entry by first checking identifiers then connections.
         """Get entry from identifiers or connections."""
         if identifiers:
             for identifier in identifiers:
@@ -722,6 +745,7 @@ class ActiveDeviceRegistryItems(DeviceRegistryItems[DeviceEntry]):
         self._labels_index: RegistryIndexType = defaultdict(dict)
 
     def _index_entry(self, key: str, entry: DeviceEntry) -> None:
+        # Index extra attributes for active devices: area_id, labels and config entries
         """Index an entry."""
         super()._index_entry(key, entry)
         if (area_id := entry.area_id) is not None:
@@ -734,6 +758,7 @@ class ActiveDeviceRegistryItems(DeviceRegistryItems[DeviceEntry]):
     def _unindex_entry(
         self, key: str, replacement_entry: DeviceEntry | None = None
     ) -> None:
+        # Remove from area/label/config_entry indexes in addition to base indexes.
         """Unindex an entry."""
         entry = self.data[key]
         if area_id := entry.area_id:
@@ -1120,6 +1145,11 @@ class DeviceRegistry(BaseRegistry[dict[str, list[dict[str, Any]]]]):
         sw_version: str | None | UndefinedType = UNDEFINED,
         via_device_id: str | None | UndefinedType = UNDEFINED,
     ) -> DeviceEntry | None:
+        # Core internal routine that applies attribute updates to a DeviceEntry.
+        # Handles adding/removing config entries, merging/validating identifiers
+        # and connections, updating scalar attributes and handling persistence
+        # and event emission. Returns the updated DeviceEntry or None when
+        # the device was removed as part of the operation.
         """Private update device attributes.
 
         :param add_config_subentry_id: Add the device to a specific subentry of add_config_entry_id
@@ -1319,6 +1349,9 @@ class DeviceRegistry(BaseRegistry[dict[str, list[dict[str, Any]]]]):
         sw_version: str | None | UndefinedType = UNDEFINED,
         via_device_id: str | None | UndefinedType = UNDEFINED,
     ) -> DeviceEntry | None:
+        # Public wrapper around `_async_update_device` that performs deprecation
+        # reporting for `suggested_area` and forwards arguments to the internal
+        # implementation.
         """Update device attributes.
 
         :param add_config_subentry_id: Add the device to a specific subentry of add_config_entry_id
@@ -1366,6 +1399,9 @@ class DeviceRegistry(BaseRegistry[dict[str, list[dict[str, Any]]]]):
         connections: set[tuple[str, str]],
         allow_collisions: bool,
     ) -> set[tuple[str, str]]:
+        # Normalize and optionally check for collisions of connections.
+        # If allow_collisions is False this will raise DeviceConnectionCollisionError
+        # when another device already claims a connection tuple.
         """Normalize and validate connections, raise on collision with other devices."""
         normalized_connections = _normalize_connections(connections)
         if allow_collisions:
@@ -1391,6 +1427,7 @@ class DeviceRegistry(BaseRegistry[dict[str, list[dict[str, Any]]]]):
         identifiers: set[tuple[str, str]],
         allow_collisions: bool,
     ) -> set[tuple[str, str]]:
+        # Validate identifier collisions similar to `_validate_connections`.
         """Validate identifiers, raise on collision with other devices."""
         if allow_collisions:
             return identifiers
@@ -1408,6 +1445,9 @@ class DeviceRegistry(BaseRegistry[dict[str, list[dict[str, Any]]]]):
 
     @callback
     def async_remove_device(self, device_id: str) -> None:
+        # Delete an active device, move it to the deleted_devices index and
+        # fire the registry removed event. Also updates any devices that
+        # referenced the removed device via `via_device_id`.
         """Remove a device from the device registry."""
         self.hass.verify_event_loop_thread("device_registry.async_remove_device")
         device = self.devices.pop(device_id)
@@ -1437,6 +1477,8 @@ class DeviceRegistry(BaseRegistry[dict[str, list[dict[str, Any]]]]):
         self.async_schedule_save()
 
     async def async_load(self) -> None:
+        # Load persisted device registry data from storage and populate
+        # internal indexes for active and deleted devices.
         """Load the device registry."""
         async_setup_cleanup(self.hass, self)
 
@@ -1537,6 +1579,7 @@ class DeviceRegistry(BaseRegistry[dict[str, list[dict[str, Any]]]]):
 
     @callback
     def _data_to_save(self) -> dict[str, Any]:
+        # Prepare the JSON-serializable structure that will be written to disk.
         """Return data of device registry to store in a file."""
         return {
             "devices": [entry.as_storage_fragment for entry in self.devices.values()],
@@ -1547,6 +1590,9 @@ class DeviceRegistry(BaseRegistry[dict[str, list[dict[str, Any]]]]):
 
     @callback
     def async_clear_config_entry(self, config_entry_id: str) -> None:
+        # Remove references to a config entry from all devices. If a deleted
+        # device loses its last config entry we mark it orphaned and set
+        # an orphan timestamp for later purging.
         """Clear config entry from registry entries."""
         now_time = time.time()
         for device in self.devices.get_devices_for_config_entry_id(config_entry_id):
@@ -1582,6 +1628,8 @@ class DeviceRegistry(BaseRegistry[dict[str, list[dict[str, Any]]]]):
     def async_clear_config_subentry(
         self, config_entry_id: str, config_subentry_id: str
     ) -> None:
+        # Remove references to a specific subentry of a config entry from
+        # devices; used when a subflow is removed.
         """Clear config entry from registry entries."""
         now_time = time.time()
         for device in self.devices.get_devices_for_config_entry_id(config_entry_id):
@@ -1631,6 +1679,8 @@ class DeviceRegistry(BaseRegistry[dict[str, list[dict[str, Any]]]]):
         We need to purge these periodically to avoid the database
         growing without bound.
         """
+        # Remove deleted devices which have been orphaned for longer than
+        # ORPHANED_DEVICE_KEEP_SECONDS to prevent unbounded growth.
         now_time = time.time()
         for deleted_device in list(self.deleted_devices.values()):
             if deleted_device.orphaned_timestamp is None:
@@ -1672,6 +1722,8 @@ class DeviceRegistry(BaseRegistry[dict[str, list[dict[str, Any]]]]):
 @callback
 @singleton(DATA_REGISTRY)
 def async_get(hass: HomeAssistant) -> DeviceRegistry:
+    # Return the singleton DeviceRegistry instance for this HomeAssistant
+    # instance. Uses the @singleton decorator to ensure a single registry.
     """Get device registry."""
     return DeviceRegistry(hass)
 
@@ -1684,6 +1736,7 @@ async def async_load(hass: HomeAssistant) -> None:
 
 @callback
 def async_entries_for_area(registry: DeviceRegistry, area_id: str) -> list[DeviceEntry]:
+    # Convenience helper: return active devices assigned to the given area id.
     """Return entries that match an area."""
     return registry.devices.get_devices_for_area_id(area_id)
 
@@ -1692,6 +1745,7 @@ def async_entries_for_area(registry: DeviceRegistry, area_id: str) -> list[Devic
 def async_entries_for_label(
     registry: DeviceRegistry, label_id: str
 ) -> list[DeviceEntry]:
+    # Convenience helper: return active devices that have the given label.
     """Return entries that match a label."""
     return registry.devices.get_devices_for_label(label_id)
 
@@ -1700,6 +1754,7 @@ def async_entries_for_label(
 def async_entries_for_config_entry(
     registry: DeviceRegistry, config_entry_id: str
 ) -> list[DeviceEntry]:
+    # Convenience helper: return active devices linked to the given config entry.
     """Return entries that match a config entry."""
     return registry.devices.get_devices_for_config_entry_id(config_entry_id)
 
