@@ -58,11 +58,6 @@ if TYPE_CHECKING:
 else:
     from propcache.api import under_cached_property
 
-
-# Type variables used for backward-compatible typing where
-# inline function/class type parameter syntax was previously used.
-# _EntryTypeT is constrained to either DeviceEntry or DeletedDeviceEntry.
-# _EnumT is a TypeVar bound to StrEnum used by get_optional_enum.
 _EntryTypeT = TypeVar("_EntryTypeT", "DeviceEntry", "DeletedDeviceEntry")
 _EnumT = TypeVar("_EnumT", bound=StrEnum)
 
@@ -239,10 +234,7 @@ class DeviceConnectionCollisionError(DeviceCollisionError):
             f"already registered with {existing_device}"
         )
 
-# Validate and classify a DeviceInfo mapping. Returns the detected
-# device_info_type (one of 'link', 'primary', 'secondary'). Raises
-# DeviceInfoError when the supplied mapping does not provide required
-# information or contains unsupported keys.
+# Validate a DeviceInfo mapping and classify it as one of: 'link', 'primary', or 'secondary', based on which allowed keys it contains.
 def _validate_device_info(
     config_entry: ConfigEntry,
     device_info: DeviceInfo,
@@ -282,11 +274,8 @@ def _validate_device_info(
 _cached_parse_url = lru_cache(maxsize=512)(URL)
 """Parse a URL and cache the result."""
 
-
+# Validate `configuration_url` is a supported URL with scheme and host.
 def _validate_configuration_url(value: Any) -> str | None:
-    # Validate `configuration_url` is a supported URL with scheme and host.
-    # Returns the string form of the URL or None when input is None.
-    # Raises ValueError on invalid scheme/host.
     """Validate and convert configuration_url."""
     if value is None:
         return None
@@ -299,12 +288,9 @@ def _validate_configuration_url(value: Any) -> str | None:
 
     return url_as_str
 
-
+# Format the mac address string for entry into dev reg.
 @lru_cache(maxsize=512)
 def format_mac(mac: str) -> str:
-    # Normalize MAC addresses into lower-case colon-separated form.
-    # Accepts common formats (aa:bb:cc:dd:ee:ff, aabb.ccdd.eeff, aabbccddeeff).
-    """Format the mac address string for entry into dev reg."""
     to_test = mac
 
     if len(to_test) == 17 and to_test.count(":") == 5:
@@ -322,27 +308,21 @@ def format_mac(mac: str) -> str:
     # Not sure how formatted, return original
     return mac
 
-
+# Normalize connections to ensure we can match mac addresses.
 def _normalize_connections(
     connections: Iterable[tuple[str, str]],
 ) -> set[tuple[str, str]]:
-    # Normalize a sequence of (connection_type, identifier) tuples.
-    # For MAC connections the identifier is normalized via format_mac.
-    """Normalize connections to ensure we can match mac addresses."""
     return {
         (key, format_mac(value)) if key == CONNECTION_NETWORK_MAC else (key, value)
         for key, value in connections
     }
 
-
+# Check connections normalization used as attrs validator.
 def _normalize_connections_validator(
     instance: Any,
     attribute: Any,
     connections: Iterable[tuple[str, str]],
 ) -> None:
-    """Check connections normalization used as attrs validator."""
-    # attrs validator used by DeviceEntry to ensure stored connections
-    # already have canonical MAC formatting when key == CONNECTION_NETWORK_MAC.
     for key, value in connections:
         if key == CONNECTION_NETWORK_MAC and format_mac(value) != value:
             raise ValueError(f"Invalid mac address format: {value}")
@@ -387,13 +367,10 @@ class DeviceEntry:
         return self.disabled_by is not None
 
     @property
-    # Convert the DeviceEntry into a JSON-serializable dict used in events
-    # and external presentation (e.g., websocket responses).
+    # Convert the DeviceEntry into a JSON-serializable dict used in events and external presentation.
     def dict_repr(self) -> dict[str, Any]:
         """Return a dict representation of the entry."""
-        # Convert sets and tuples to lists
-        # so the JSON serializer does not have to do
-        # it every time
+        # Convert sets and tuples to lists so the JSON serializer does not have to do it every time
         return {
             "area_id": self.area_id,
             "configuration_url": self.configuration_url,
@@ -422,10 +399,9 @@ class DeviceEntry:
             "via_device_id": self.via_device_id,
         }
 
+    # Return a cached JSON representation of the entry.
     @under_cached_property
     def json_repr(self) -> bytes | None:
-        # Cached JSON bytes used for efficient storage and cache comparisons.
-        """Return a cached JSON representation of the entry."""
         try:
             dict_repr = self.dict_repr
             return json_bytes(dict_repr)
@@ -439,10 +415,9 @@ class DeviceEntry:
             )
         return None
 
+    # Return a json fragment for storage.
     @under_cached_property
     def as_storage_fragment(self) -> Any:
-        # Storage-specific representation used when persisting the registry.
-        """Return a json fragment for storage."""
         return json_fragment(
             json_bytes(
                 {
@@ -539,9 +514,9 @@ class DeletedDeviceEntry:
             name_by_user=self.name_by_user,
         )
 
+    # Return a json fragment for storage.
     @under_cached_property
     def as_storage_fragment(self) -> Any:
-        """Return a json fragment for storage."""
         return json_fragment(
             json_bytes(
                 {
@@ -569,12 +544,8 @@ class DeletedDeviceEntry:
             )
         )
 
-
+# Store entity registry data.
 class DeviceRegistryStore(storage.Store[dict[str, list[dict[str, Any]]]]):
-    """Store entity registry data."""
-
-    # Migration routine for persisted device registry data. Responsible for
-    # upgrading data from older storage minor versions to the current format.
     async def _async_migrate_func(  # noqa: C901
         self,
         old_major_version: int,
@@ -671,7 +642,7 @@ class DeviceRegistryStore(storage.Store[dict[str, list[dict[str, Any]]]]):
             raise NotImplementedError
         return old_data
 
-
+# Container for device registry items.
 class DeviceRegistryItems(BaseRegistryItems[_EntryTypeT], Generic[_EntryTypeT]):
     """Container for device registry items, maps device id -> entry.
 
@@ -679,33 +650,24 @@ class DeviceRegistryItems(BaseRegistryItems[_EntryTypeT], Generic[_EntryTypeT]):
     - (connection_type, connection identifier) -> entry
     - (DOMAIN, identifier) -> entry
     """
-    """Container for device registry items, maps device id -> entry.
 
-    Maintains two additional indexes:
-    - (connection_type, connection identifier) -> entry
-    - (DOMAIN, identifier) -> entry
-    """
-
+    # Initialize the container.
     def __init__(self) -> None:
-        """Initialize the container."""
         super().__init__()
         self._connections: dict[tuple[str, str], _EntryTypeT] = {}
         self._identifiers: dict[tuple[str, str], _EntryTypeT] = {}
 
+    # Index an entry.
     def _index_entry(self, key: str, entry: _EntryTypeT) -> None:
-        # Index connections and identifiers for fast lookup by those values.
-        """Index an entry."""
         for connection in entry.connections:
             self._connections[connection] = entry
         for identifier in entry.identifiers:
             self._identifiers[identifier] = entry
 
+    # Unindex an entry.
     def _unindex_entry(
         self, key: str, replacement_entry: _EntryTypeT | None = None
     ) -> None:
-        # Remove the entry from connection/identifier indexes when deleted
-        # or replaced.
-        """Unindex an entry."""
         old_entry = self.data[key]
         for connection in old_entry.connections:
             if connection in self._connections:
@@ -714,13 +676,12 @@ class DeviceRegistryItems(BaseRegistryItems[_EntryTypeT], Generic[_EntryTypeT]):
             if identifier in self._identifiers:
                 del self._identifiers[identifier]
 
+    # Get an entry by identifiers or connections.
     def get_entry(
         self,
         identifiers: set[tuple[str, str]] | None = None,
         connections: set[tuple[str, str]] | None = None,
     ) -> _EntryTypeT | None:
-        # Lookup an entry by first checking identifiers then connections.
-        """Get entry from identifiers or connections."""
         if identifiers:
             for identifier in identifiers:
                 if identifier in self._identifiers:
@@ -732,12 +693,12 @@ class DeviceRegistryItems(BaseRegistryItems[_EntryTypeT], Generic[_EntryTypeT]):
                 return self._connections[connection]
         return None
 
+    # Get all entries matching identifiers or connections.
     def get_entries(
         self,
         identifiers: set[tuple[str, str]] | None,
         connections: set[tuple[str, str]] | None,
     ) -> Iterable[_EntryTypeT]:
-        """Get entries from identifiers or connections."""
         if identifiers:
             for identifier in identifiers:
                 if identifier in self._identifiers:
@@ -747,9 +708,8 @@ class DeviceRegistryItems(BaseRegistryItems[_EntryTypeT], Generic[_EntryTypeT]):
                 if connection in self._connections:
                     yield self._connections[connection]
 
-
+# Container for active device registry items.
 class ActiveDeviceRegistryItems(DeviceRegistryItems[DeviceEntry]):
-    """Container for active (non-deleted) device registry entries."""
 
     def __init__(self) -> None:
         """Initialize the container.
@@ -765,9 +725,8 @@ class ActiveDeviceRegistryItems(DeviceRegistryItems[DeviceEntry]):
         self._config_entry_id_index: RegistryIndexType = defaultdict(dict)
         self._labels_index: RegistryIndexType = defaultdict(dict)
 
+    # Index an entry.
     def _index_entry(self, key: str, entry: DeviceEntry) -> None:
-        # Index extra attributes for active devices: area_id, labels and config entries
-        """Index an entry."""
         super()._index_entry(key, entry)
         if (area_id := entry.area_id) is not None:
             self._area_id_index[area_id][key] = True
@@ -776,11 +735,11 @@ class ActiveDeviceRegistryItems(DeviceRegistryItems[DeviceEntry]):
         for config_entry_id in entry.config_entries:
             self._config_entry_id_index[config_entry_id][key] = True
 
+    # Unindex an entry.
     def _unindex_entry(
         self, key: str, replacement_entry: DeviceEntry | None = None
     ) -> None:
         # Remove from area/label/config_entry indexes in addition to base indexes.
-        """Unindex an entry."""
         entry = self.data[key]
         if area_id := entry.area_id:
             self._unindex_entry_value(key, area_id, self._area_id_index)
@@ -791,35 +750,33 @@ class ActiveDeviceRegistryItems(DeviceRegistryItems[DeviceEntry]):
             self._unindex_entry_value(key, config_entry_id, self._config_entry_id_index)
         super()._unindex_entry(key, replacement_entry)
 
+    # Get devices for area.
     def get_devices_for_area_id(self, area_id: str) -> list[DeviceEntry]:
-        """Get devices for area."""
         data = self.data
         return [data[key] for key in self._area_id_index.get(area_id, ())]
 
+    # Get devices for label.
     def get_devices_for_label(self, label: str) -> list[DeviceEntry]:
-        """Get devices for label."""
         data = self.data
         return [data[key] for key in self._labels_index.get(label, ())]
 
+    # Get devices for config entry.
     def get_devices_for_config_entry_id(
         self, config_entry_id: str
     ) -> list[DeviceEntry]:
-        """Get devices for config entry."""
         data = self.data
         return [
             data[key] for key in self._config_entry_id_index.get(config_entry_id, ())
         ]
 
-
+# Class to hold a registry of devices.
 class DeviceRegistry(BaseRegistry[dict[str, list[dict[str, Any]]]]):
-    """Class to hold a registry of devices."""
-
     devices: ActiveDeviceRegistryItems
     deleted_devices: DeviceRegistryItems[DeletedDeviceEntry]
     _device_data: dict[str, DeviceEntry]
 
+    # Initialize the device registry.
     def __init__(self, hass: HomeAssistant) -> None:
-        """Initialize the device registry."""
         self.hass = hass
         self._store = DeviceRegistryStore(
             hass,
@@ -829,15 +786,16 @@ class DeviceRegistry(BaseRegistry[dict[str, list[dict[str, Any]]]]):
             minor_version=STORAGE_VERSION_MINOR,
         )
 
+    # Get a device by device id.
     @callback
     def async_get(self, device_id: str) -> DeviceEntry | None:
-        """Get device.
-
+        """
         We retrieve the DeviceEntry from the underlying dict to avoid
         the overhead of the UserDict __getitem__.
         """
         return self._device_data.get(device_id)
 
+    # Get a device by identifiers or connections.
     @callback
     def async_get_device(
         self,
@@ -847,13 +805,13 @@ class DeviceRegistry(BaseRegistry[dict[str, list[dict[str, Any]]]]):
         """Check if device is registered."""
         return self.devices.get_entry(identifiers, connections)
 
+    # Substitute placeholders in entity name.
     def _substitute_name_placeholders(
         self,
         domain: str,
         name: str,
         translation_placeholders: Mapping[str, str],
     ) -> str:
-        """Substitute placeholders in entity name."""
         try:
             return name.format(**translation_placeholders)
         except KeyError as err:
@@ -897,9 +855,11 @@ class DeviceRegistry(BaseRegistry[dict[str, list[dict[str, Any]]]]):
         sw_version=UNDEFINED,
         via_device=UNDEFINED,
     ):
-        """Build DeviceInfo, validate it and normalize identifiers/connections.
+        """Build and validate a DeviceInfo mapping and normalize inputs.
 
-        Returns (device_info, device_info_type, connections_set, identifiers_set, name)
+        Returns a tuple: (device_info, device_info_type, connections_set,
+        identifiers_set, name). Connections and identifiers are converted to
+        sets and MAC addresses in connections are normalized.
         """
         if configuration_url is not UNDEFINED:
             configuration_url = _validate_configuration_url(configuration_url)
@@ -953,6 +913,7 @@ class DeviceRegistry(BaseRegistry[dict[str, list[dict[str, Any]]]]):
 
         return device_info, device_info_type, connections_set, identifiers_set, name
 
+    # Create or restore a device entry.
     @callback
     def _create_or_restore_device(
         self,
@@ -1241,7 +1202,6 @@ class DeviceRegistry(BaseRegistry[dict[str, list[dict[str, Any]]]]):
             # If helper indicates device should be removed
             if new_vals_rem is None:
                 self.async_remove_device(device_id)
-                return None
             new_values.update(new_vals_rem)
             old_values.update(old_vals_rem)
 
@@ -1497,10 +1457,10 @@ class DeviceRegistry(BaseRegistry[dict[str, list[dict[str, Any]]]]):
         )
         self.async_schedule_save()
 
+    # Load the device registry from storage.
     async def async_load(self) -> None:
         # Load persisted device registry data from storage and populate
         # internal indexes for active and deleted devices.
-        """Load the device registry."""
         async_setup_cleanup(self.hass, self)
 
         data = await self._store.async_load()
@@ -1598,10 +1558,10 @@ class DeviceRegistry(BaseRegistry[dict[str, list[dict[str, Any]]]]):
         self.deleted_devices = deleted_devices
         self._device_data = devices.data
 
+    # Return data of the device registry to store in a file.
     @callback
     def _data_to_save(self) -> dict[str, Any]:
         # Prepare the JSON-serializable structure that will be written to disk.
-        """Return data of device registry to store in a file."""
         return {
             "devices": [entry.as_storage_fragment for entry in self.devices.values()],
             "deleted_devices": [
@@ -1609,12 +1569,12 @@ class DeviceRegistry(BaseRegistry[dict[str, list[dict[str, Any]]]]):
             ],
         }
 
+    # Clear config entry from registry devices.
     @callback
     def async_clear_config_entry(self, config_entry_id: str) -> None:
         # Remove references to a config entry from all devices. If a deleted
         # device loses its last config entry we mark it orphaned and set
         # an orphan timestamp for later purging.
-        """Clear config entry from registry entries."""
         now_time = time.time()
         for device in self.devices.get_devices_for_config_entry_id(config_entry_id):
             self._async_update_device(device.id, remove_config_entry_id=config_entry_id)
@@ -1645,6 +1605,7 @@ class DeviceRegistry(BaseRegistry[dict[str, list[dict[str, Any]]]]):
                 )
             self.async_schedule_save()
 
+    # Clear config entry from registry entries.
     @callback
     def async_clear_config_subentry(
         self, config_entry_id: str, config_subentry_id: str
@@ -1713,9 +1674,9 @@ class DeviceRegistry(BaseRegistry[dict[str, list[dict[str, Any]]]]):
             ):
                 del self.deleted_devices[deleted_device.id]
 
+    # Clear area id from registry entries.
     @callback
     def async_clear_area_id(self, area_id: str) -> None:
-        """Clear area id from registry entries."""
         for device in self.devices.get_devices_for_area_id(area_id):
             self._async_update_device(device.id, area_id=None)
         for deleted_device in list(self.deleted_devices.values()):
@@ -1726,9 +1687,9 @@ class DeviceRegistry(BaseRegistry[dict[str, list[dict[str, Any]]]]):
             )
             self.async_schedule_save()
 
+    # Clear label id from registry entries.
     @callback
     def async_clear_label_id(self, label_id: str) -> None:
-        """Clear label from registry entries."""
         for device in self.devices.get_devices_for_label(label_id):
             self._async_update_device(device.id, labels=device.labels - {label_id})
         for deleted_device in list(self.deleted_devices.values()):
@@ -1739,44 +1700,39 @@ class DeviceRegistry(BaseRegistry[dict[str, list[dict[str, Any]]]]):
             )
             self.async_schedule_save()
 
-
+# Get the device registry.
 @callback
 @singleton(DATA_REGISTRY)
 def async_get(hass: HomeAssistant) -> DeviceRegistry:
     # Return the singleton DeviceRegistry instance for this HomeAssistant
     # instance. Uses the @singleton decorator to ensure a single registry.
-    """Get device registry."""
     return DeviceRegistry(hass)
 
-
+# Load the device registry.
 async def async_load(hass: HomeAssistant) -> None:
-    """Load device registry."""
     assert DATA_REGISTRY not in hass.data
     await async_get(hass).async_load()
 
-
+# Return entries for area.
 @callback
 def async_entries_for_area(registry: DeviceRegistry, area_id: str) -> list[DeviceEntry]:
     # Convenience helper: return active devices assigned to the given area id.
-    """Return entries that match an area."""
     return registry.devices.get_devices_for_area_id(area_id)
 
-
+# Return entries for label.
 @callback
 def async_entries_for_label(
     registry: DeviceRegistry, label_id: str
 ) -> list[DeviceEntry]:
     # Convenience helper: return active devices that have the given label.
-    """Return entries that match a label."""
     return registry.devices.get_devices_for_label(label_id)
 
-
+# Return entries for config entry.
 @callback
 def async_entries_for_config_entry(
     registry: DeviceRegistry, config_entry_id: str
 ) -> list[DeviceEntry]:
     # Convenience helper: return active devices linked to the given config entry.
-    """Return entries that match a config entry."""
     return registry.devices.get_devices_for_config_entry_id(config_entry_id)
 
 
@@ -1820,14 +1776,13 @@ def async_config_entry_disabled_by_changed(
             device.id, disabled_by=DeviceEntryDisabler.CONFIG_ENTRY
         )
 
-
+# Cleanup device registry
 @callback
 def async_cleanup(
     hass: HomeAssistant,
     dev_reg: DeviceRegistry,
     ent_reg: entity_registry.EntityRegistry,
 ) -> None:
-    """Clean up device registry."""
     # Find all devices that are referenced by a config_entry.
     config_entry_ids = set(hass.config_entries.async_entry_ids())
     references_config_entries = {
@@ -1862,22 +1817,21 @@ def async_cleanup(
     # growing without bounds when there are lots of deleted devices
     dev_reg.async_purge_expired_orphaned_devices()
 
-
+# Clean up device registry when entities removed.
 @callback
 def async_setup_cleanup(hass: HomeAssistant, dev_reg: DeviceRegistry) -> None:
-    """Clean up device registry when entities removed."""
     from . import entity_registry, label_registry as lr  # noqa: PLC0415
 
+    # Filter all except for the remove action from label registry events.
     @callback
     def _label_removed_from_registry_filter(
         event_data: lr.EventLabelRegistryUpdatedData,
     ) -> bool:
-        """Filter all except for the remove action from label registry events."""
         return event_data["action"] == "remove"
 
+    # Update devices that have a label that has been removed.
     @callback
     def _handle_label_registry_update(event: lr.EventLabelRegistryUpdated) -> None:
-        """Update devices that have a label that has been removed."""
         dev_reg.async_clear_label_id(event.data["label_id"])
 
     hass.bus.async_listen(
@@ -1886,9 +1840,9 @@ def async_setup_cleanup(hass: HomeAssistant, dev_reg: DeviceRegistry) -> None:
         listener=_handle_label_registry_update,
     )
 
+    # Cleanup
     @callback
     def _async_cleanup() -> None:
-        """Cleanup."""
         ent_reg = entity_registry.async_get(hass)
         async_cleanup(hass, dev_reg, ent_reg)
 
@@ -1896,18 +1850,18 @@ def async_setup_cleanup(hass: HomeAssistant, dev_reg: DeviceRegistry) -> None:
         hass, _LOGGER, cooldown=CLEANUP_DELAY, immediate=False, function=_async_cleanup
     )
 
+    # Handle entity updated or removed dispatch.
     @callback
     def _async_entity_registry_changed(
         event: Event[entity_registry.EventEntityRegistryUpdatedData],
     ) -> None:
-        """Handle entity updated or removed dispatch."""
         debounced_cleanup.async_schedule_call()
 
+    # Handle entity updated or removed filter
     @callback
     def entity_registry_changed_filter(
         event_data: entity_registry.EventEntityRegistryUpdatedData,
     ) -> bool:
-        """Handle entity updated or removed filter."""
         if (
             event_data["action"] == "update"
             and "device_id" not in event_data["changes"]
@@ -1916,8 +1870,8 @@ def async_setup_cleanup(hass: HomeAssistant, dev_reg: DeviceRegistry) -> None:
 
         return True
 
+    # Listen for entity registry changes.
     def _async_listen_for_cleanup() -> None:
-        """Listen for entity registry changes."""
         hass.bus.async_listen(
             entity_registry.EVENT_ENTITY_REGISTRY_UPDATED,
             _async_entity_registry_changed,
@@ -1935,9 +1889,9 @@ def async_setup_cleanup(hass: HomeAssistant, dev_reg: DeviceRegistry) -> None:
 
     hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STARTED, startup_clean)
 
+    # Cancel cleanup on shutdown
     @callback
     def _on_homeassistant_stop(event: Event) -> None:
-        """Cancel debounced cleanup."""
         debounced_cleanup.async_cancel()
 
     hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STOP, _on_homeassistant_stop)
