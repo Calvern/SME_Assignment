@@ -747,8 +747,42 @@ async def merge_packages_config(
                 merge_list = _identify_config_schema(component) == "list"
 
             if merge_list:
+                # Existing items already present in the main config
+                existing_items = cv.ensure_list(config.get(comp_name))
+
+                # Items coming from this package
+                package_items = cv.ensure_list(comp_conf)
+
+                valid_package_items: list[Any] = []
+                for idx, item in enumerate(package_items):
+                    # Treat None as "no config" and silently ignore it
+                    if item is None:
+                        continue
+
+                    # For list-based integrations in packages, we expect each item
+                    # to be a mapping (dict-like). Anything else is very likely
+                    # a configuration error.
+                    if not isinstance(item, dict):
+                        _log_pkg_error(
+                            hass,
+                            pack_name,
+                            comp_name,
+                            config,
+                            (
+                                f"integration '{comp_name}' in package '{pack_name}' "
+                                f"has invalid list item at index {idx}: expected a dict, "
+                                f"got {type(item).__name__}"
+                            ),
+                        )
+                        # Skip this invalid list item
+                        continue
+
+                    valid_package_items.append(item)
+
+                # Keep the existing semantics of remove_falsy, but only with
+                # valid items from the package.
                 config[comp_name] = cv.remove_falsy(
-                    cv.ensure_list(config.get(comp_name)) + cv.ensure_list(comp_conf)
+                    existing_items + valid_package_items
                 )
                 continue
 
