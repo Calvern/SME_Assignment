@@ -829,6 +829,134 @@ class DeviceRegistry(BaseRegistry[dict[str, list[dict[str, Any]]]]):
             return name
 
     @callback
+    def _prepare_device_info_and_normalize(
+        self,
+        config_entry,
+        configuration_url,
+        connections,
+        identifiers,
+        translation_key,
+        translation_placeholders,
+        name,
+        default_manufacturer=UNDEFINED,
+        default_model=UNDEFINED,
+        default_name=UNDEFINED,
+        entry_type=UNDEFINED,
+        hw_version=UNDEFINED,
+        manufacturer=UNDEFINED,
+        model=UNDEFINED,
+        model_id=UNDEFINED,
+        serial_number=UNDEFINED,
+        suggested_area=UNDEFINED,
+        sw_version=UNDEFINED,
+        via_device=UNDEFINED,
+    ):
+        """Build DeviceInfo, validate it and normalize identifiers/connections.
+
+        Returns (device_info, device_info_type, connections_set, identifiers_set, name)
+        """
+        if configuration_url is not UNDEFINED:
+            configuration_url = _validate_configuration_url(configuration_url)
+
+        if translation_key:
+            full_translation_key = (
+                f"component.{config_entry.domain}.device.{translation_key}.name"
+            )
+            translations = translation.async_get_cached_translations(
+                self.hass, self.hass.config.language, "device", config_entry.domain
+            )
+            translated_name = translations.get(full_translation_key, translation_key)
+            name = self._substitute_name_placeholders(
+                config_entry.domain, translated_name, translation_placeholders or {}
+            )
+
+        device_info = {
+            key: val
+            for key, val in (
+                ("configuration_url", configuration_url),
+                ("connections", connections),
+                ("default_manufacturer", default_manufacturer),
+                ("default_model", default_model),
+                ("default_name", default_name),
+                ("entry_type", entry_type),
+                ("hw_version", hw_version),
+                ("identifiers", identifiers),
+                ("manufacturer", manufacturer),
+                ("model", model),
+                ("model_id", model_id),
+                ("name", name),
+                ("serial_number", serial_number),
+                ("suggested_area", suggested_area),
+                ("sw_version", sw_version),
+                ("via_device", via_device),
+            )
+            if val is not UNDEFINED
+        }
+
+        device_info_type = _validate_device_info(config_entry, device_info)
+
+        if identifiers is None or identifiers is UNDEFINED:
+            identifiers_set = set()
+        else:
+            identifiers_set = set(identifiers)
+
+        if connections is None or connections is UNDEFINED:
+            connections_set = set()
+        else:
+            connections_set = _normalize_connections(connections)
+
+        return device_info, device_info_type, connections_set, identifiers_set, name
+
+    @callback
+    def _create_or_restore_device(
+        self,
+        config_entry,
+        config_subentry_id,
+        connections_set,
+        identifiers_set,
+        suggested_area,
+        disabled_by,
+    ):
+        """Return existing device or create/restore a new DeviceEntry.
+
+        Returns (device, is_new)
+        """
+        device = self.devices.get_entry(identifiers=identifiers_set, connections=connections_set)
+        is_new = False
+
+        if device is None:
+            is_new = True
+            deleted_device = self.deleted_devices.get_entry(identifiers_set, connections_set)
+            if deleted_device is None:
+                area_id = None
+                if (
+                    suggested_area is not None
+                    and suggested_area is not UNDEFINED
+                    and suggested_area != ""
+                ):
+                    # Circular dep
+                    from . import area_registry as ar  # noqa: PLC0415
+
+                    area = ar.async_get(self.hass).async_get_or_create(suggested_area)
+                    area_id = area.id
+                device = DeviceEntry(area_id=area_id)
+            else:
+                self.deleted_devices.pop(deleted_device.id)
+                device = deleted_device.to_device_entry(
+                    config_entry,
+                    # Interpret not specifying a subentry as None
+                    config_subentry_id if config_subentry_id is not UNDEFINED else None,
+                    connections_set,
+                    identifiers_set,
+                    disabled_by,
+                )
+                disabled_by = UNDEFINED
+
+            self.devices[device.id] = device
+
+        return device, is_new
+
+    @callback
     def async_get_or_create(
         self,
         *,
@@ -858,104 +986,54 @@ class DeviceRegistry(BaseRegistry[dict[str, list[dict[str, Any]]]]):
         via_device: tuple[str, str] | None | UndefinedType = UNDEFINED,
     ) -> DeviceEntry:
         """Get device. Create if it doesn't exist."""
-        if configuration_url is not UNDEFINED:
-            configuration_url = _validate_configuration_url(configuration_url)
-
         config_entry = self.hass.config_entries.async_get_entry(config_entry_id)
         if config_entry is None:
             raise HomeAssistantError(
                 f"Can't link device to unknown config entry {config_entry_id}"
             )
 
-        if translation_key:
-            full_translation_key = (
-                f"component.{config_entry.domain}.device.{translation_key}.name"
-            )
-            translations = translation.async_get_cached_translations(
-                self.hass, self.hass.config.language, "device", config_entry.domain
-            )
-            translated_name = translations.get(full_translation_key, translation_key)
-            name = self._substitute_name_placeholders(
-                config_entry.domain, translated_name, translation_placeholders or {}
-            )
-
-        # Reconstruct a DeviceInfo dict from the arguments.
-        # When we upgrade to Python 3.12, we can change this method to instead
-        # accept kwargs typed as a DeviceInfo dict (PEP 692)
-        device_info: DeviceInfo = {  # type: ignore[assignment]
-            key: val
-            for key, val in (
-                ("configuration_url", configuration_url),
-                ("connections", connections),
-                ("default_manufacturer", default_manufacturer),
-                ("default_model", default_model),
-                ("default_name", default_name),
-                ("entry_type", entry_type),
-                ("hw_version", hw_version),
-                ("identifiers", identifiers),
-                ("manufacturer", manufacturer),
-                ("model", model),
-                ("model_id", model_id),
-                ("name", name),
-                ("serial_number", serial_number),
-                ("suggested_area", suggested_area),
-                ("sw_version", sw_version),
-                ("via_device", via_device),
-            )
-            if val is not UNDEFINED
-        }
-
-        device_info_type = _validate_device_info(config_entry, device_info)
-
-        if identifiers is None or identifiers is UNDEFINED:
-            identifiers = set()
-
-        if connections is None or connections is UNDEFINED:
-            connections = set()
-        else:
-            connections = _normalize_connections(connections)
-
-        device = self.devices.get_entry(
-            identifiers=identifiers, connections=connections
+        (
+            device_info,
+            device_info_type,
+            connections_set,
+            identifiers_set,
+            name,
+        ) = self._prepare_device_info_and_normalize(
+            config_entry,
+            configuration_url,
+            connections,
+            identifiers,
+            translation_key,
+            translation_placeholders,
+            name,
+            default_manufacturer,
+            default_model,
+            default_name,
+            entry_type,
+            hw_version,
+            manufacturer,
+            model,
+            model_id,
+            serial_number,
+            suggested_area,
+            sw_version,
+            via_device,
         )
 
-        is_new = False
+        device, is_new = self._create_or_restore_device(
+            config_entry,
+            config_subentry_id,
+            connections_set,
+            identifiers_set,
+            suggested_area,
+            disabled_by,
+        )
 
-        if device is None:
-            is_new = True
+        # If creating a new device, default to the config entry name
+        if is_new and device_info_type == "primary" and (not name or name is UNDEFINED):
+            name = config_entry.title
 
-            deleted_device = self.deleted_devices.get_entry(identifiers, connections)
-            if deleted_device is None:
-                area_id: str | None = None
-                if (
-                    suggested_area is not None
-                    and suggested_area is not UNDEFINED
-                    and suggested_area != ""
-                ):
-                    # Circular dep
-                    from . import area_registry as ar  # noqa: PLC0415
-
-                    area = ar.async_get(self.hass).async_get_or_create(suggested_area)
-                    area_id = area.id
-                device = DeviceEntry(area_id=area_id)
-
-            else:
-                self.deleted_devices.pop(deleted_device.id)
-                device = deleted_device.to_device_entry(
-                    config_entry,
-                    # Interpret not specifying a subentry as None
-                    config_subentry_id if config_subentry_id is not UNDEFINED else None,
-                    connections,
-                    identifiers,
-                    disabled_by,
-                )
-                disabled_by = UNDEFINED
-
-            self.devices[device.id] = device
-            # If creating a new device, default to the config entry name
-            if device_info_type == "primary" and (not name or name is UNDEFINED):
-                name = config_entry.title
-
+        # Apply defaults when the device does not already have the values
         if default_manufacturer is not UNDEFINED and device.manufacturer is None:
             manufacturer = default_manufacturer
 
@@ -991,8 +1069,8 @@ class DeviceRegistry(BaseRegistry[dict[str, list[dict[str, Any]]]]):
             hw_version=hw_version,
             is_new=is_new,
             manufacturer=manufacturer,
-            merge_connections=connections or UNDEFINED,
-            merge_identifiers=identifiers or UNDEFINED,
+            merge_connections=connections_set or UNDEFINED,
+            merge_identifiers=identifiers_set or UNDEFINED,
             model=model,
             model_id=model_id,
             name=name,
