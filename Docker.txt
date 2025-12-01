@@ -1,0 +1,41 @@
+# Docker Development Environment Setup Guide (runbook.txt)
+
+This guide explains how to build, run, and start developing Home Assistant Core
+inside the Docker-based development container.
+
+---
+
+## STEP 1: Build the Development Image
+
+Run this command from the root directory of the Home Assistant repository:
+
+docker build -f Dockerfile.dev -t ha-dev-env .
+
+---
+
+## STEP 2: Run the Container
+
+Run the container and mount the current project directory into /workspaces:
+
+docker run -it --rm \
+  -v "$(pwd)":/workspaces \
+  -w /workspaces \
+  ha-dev-env \
+  bash
+
+This command will:
+- Start a container using the ha-dev-env image
+- Mount your repository into /workspaces inside the container
+- Open a bash shell for interactive development
+
+---
+
+## STEP 3: Start Developing Inside the Container
+
+From inside the container, you can run commands such as:
+
+pytest
+python3 -m homeassistant --help
+
+The Python virtual environment and required dependencies have already been set up
+by Dockerfile.dev, so you can immediately start running tests and development commands.
