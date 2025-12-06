@@ -1118,21 +1118,47 @@ class HomeAssistant:
 
         This method is a coroutine.
         """
+        # 0. Validation Check
+        if not self._can_stop(force):
+            return
+
+        # Stage 1 - Run shutdown jobs
+        await self._async_shutdown_jobs()
+
+        # Stage 2 - Stop integrations
+        running_tasks = await self._async_stop_integrations(exit_code)
+
+        # Stage 3 - Final write
+        await self._async_final_write()
+
+        # Stage 4 - Close
+        await self._async_close(running_tasks)
+
+        self.set_state(CoreState.stopped)
+        self.import_executor.shutdown()
+
+        if self._stopped is not None:
+            self._stopped.set()
+
+    def _can_stop(self, force: bool) -> bool:
+        """Validate if the stop request should proceed."""
         if not force:
             # Some tests require async_stop to run,
             # regardless of the state of the loop.
             if self.state is CoreState.not_running:  # just ignore
-                return
+                return False
             if self.state in [CoreState.stopping, CoreState.final_write]:
                 _LOGGER.info("Additional call to async_stop was ignored")
-                return
+                return False
             if self.state is CoreState.starting:
                 # This may not work
                 _LOGGER.warning(
                     "Stopping Home Assistant before startup has completed may fail"
                 )
+        return True
 
-        # Stage 1 - Run shutdown jobs
+    async def _async_shutdown_jobs(self) -> None:
+        """Stage 1: Run shutdown jobs."""
         try:
             async with self.timeout.async_timeout(STOPPING_STAGE_SHUTDOWN_TIMEOUT):
                 tasks: list[asyncio.Future[Any]] = []
@@ -1150,8 +1176,10 @@ class HomeAssistant:
             )
             self._async_log_running_tasks("run shutdown jobs")
 
-        # Stage 2 - Stop integrations
-
+    async def _async_stop_integrations(
+        self, exit_code: int
+    ) -> set[asyncio.Future[Any]]:
+        """Stage 2: Stop integrations."""
         # Keep holding the reference to the tasks but do not allow them
         # to block shutdown. Only tasks created after this point will
         # be waited for.
@@ -1180,7 +1208,10 @@ class HomeAssistant:
             )
             self._async_log_running_tasks("stop integrations")
 
-        # Stage 3 - Final write
+        return running_tasks
+
+    async def _async_final_write(self) -> None:
+        """Stage 3: Final write."""
         self.set_state(CoreState.final_write)
         self.bus.async_fire_internal(EVENT_HOMEASSISTANT_FINAL_WRITE)
         try:
@@ -1193,7 +1224,7 @@ class HomeAssistant:
             )
             self._async_log_running_tasks("final write")
 
-        # Stage 4 - Close
+    async def _async_close(self, running_tasks: set[asyncio.Future[Any]]) -> None:
         self.set_state(CoreState.not_running)
         self.bus.async_fire_internal(EVENT_HOMEASSISTANT_CLOSE)
 
@@ -1242,12 +1273,6 @@ class HomeAssistant:
                 " continue"
             )
             self._async_log_running_tasks("close")
-
-        self.set_state(CoreState.stopped)
-        self.import_executor.shutdown()
-
-        if self._stopped is not None:
-            self._stopped.set()
 
     def _cancel_cancellable_timers(self) -> None:
         """Cancel timer handles marked as cancellable."""
