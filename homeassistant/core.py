@@ -24,6 +24,7 @@ import enum
 import functools
 import inspect
 import logging
+import platform
 import re
 import threading
 import time
@@ -246,6 +247,48 @@ def is_callback_check_partial(target: Callable[..., Any]) -> bool:
     while isinstance(check_target, functools.partial):
         check_target = check_target.func
     return is_callback(check_target)
+
+
+def log_execution_time(func: Callable[..., Any]) -> Callable[..., Any]:
+    """Decorator to log the execution time of a function."""
+
+    @functools.wraps(func)
+    async def wrapper(*args: Any, **kwargs: Any) -> Any:
+        start_timer = time.monotonic()
+
+        # Use Home Assistant's dt_util for the display time
+        current_time = dt_util.now().strftime("%Y-%m-%d %H:%M:%S")
+        system_platform = platform.platform()
+
+        _LOGGER.info(
+            "Start running %s on %s at %s",
+            func.__name__,
+            system_platform,
+            current_time,
+        )
+
+        # 2. Run the actual function
+        try:
+            result = await func(*args, **kwargs)
+        except Exception as err:
+            # Log the duration even if it fails!
+            duration = time.monotonic() - start_timer
+            _LOGGER.error(
+                "Failed %s after %.2f seconds. Error: %s", func.__name__, duration, err
+            )
+            raise
+
+        # 3. Capture end data and log duration
+        duration = time.monotonic() - start_timer
+        _LOGGER.info(
+            "Finished %s successfully. Duration: %.2f seconds",
+            func.__name__,
+            duration,
+        )
+
+        return result
+
+    return wrapper
 
 
 class _Hass(threading.local):
@@ -510,6 +553,7 @@ class HomeAssistant:
         await self._stopped.wait()
         return self.exit_code
 
+    @log_execution_time
     async def async_start(self) -> None:
         """Finalize startup from inside the event loop.
 
@@ -1064,6 +1108,7 @@ class HomeAssistant:
             self.async_stop(), self.loop
         )
 
+    @log_execution_time
     async def async_stop(self, exit_code: int = 0, *, force: bool = False) -> None:
         """Stop Home Assistant and shuts down all threads.
 
