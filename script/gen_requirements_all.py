@@ -16,6 +16,10 @@ from typing import Any
 from homeassistant.util.yaml.loader import load_yaml
 from script.hassfest.model import Config, Integration
 
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
+
 # Requirements which can't be installed on all systems because they rely on additional
 # system packages. Requirements listed in EXCLUDED_REQUIREMENTS_ALL will be commented-out
 # in requirements_all.txt and requirements_test_all.txt.
@@ -52,7 +56,26 @@ OVERRIDDEN_REQUIREMENTS_ACTIONS = {
         "include": INCLUDED_REQUIREMENTS_WHEELS,
         "markers": {},
     },
+    # Pandas has issues building on armhf, it is expected they
+    # will drop the platform in the near future (they consider it
+    # "flimsy" on 386). The following packages depend on pandas,
+    # so we comment them out.
+    "wheels_armhf": {
+        "exclude": {"env-canada", "noaa-coops", "pyezviz", "pykrakenapi"},
+        "include": INCLUDED_REQUIREMENTS_WHEELS,
+        "markers": {},
+    },
+    "wheels_armv7": {
+        "exclude": set(),
+        "include": INCLUDED_REQUIREMENTS_WHEELS,
+        "markers": {},
+    },
     "wheels_amd64": {
+        "exclude": set(),
+        "include": INCLUDED_REQUIREMENTS_WHEELS,
+        "markers": {},
+    },
+    "wheels_i386": {
         "exclude": set(),
         "include": INCLUDED_REQUIREMENTS_WHEELS,
         "markers": {},
@@ -68,6 +91,7 @@ URL_PIN = (
 CONSTRAINT_PATH = (
     Path(__file__).parent.parent / "homeassistant" / "package_constraints.txt"
 )
+# Note: kept as an embedded string to preserve original behavior and make the refactor easier
 CONSTRAINT_BASE = """
 # Constrain pycryptodome to avoid vulnerability
 # see https://github.com/home-assistant/core/pull/16238
@@ -202,6 +226,10 @@ aiofiles>=24.1.0
 # https://github.com/aio-libs/multidict/issues/1131
 multidict>=6.4.2
 
+# rpds-py frequently updates cargo causing build failures
+# No wheels upstream available for armhf & armv7
+rpds-py==0.26.0
+
 # Constraint num2words to 0.5.14 as 0.5.15 and 0.5.16 were removed from PyPI
 num2words==0.5.14
 
@@ -237,25 +265,65 @@ IGNORE_PRE_COMMIT_HOOK_ID = (
 PACKAGE_REGEX = re.compile(r"^(?:--.+\s)?([-_\.\w\d]+).*==.+$")
 
 
+# ---------------------------------------------------------------------------
+# Simple utilities
+# ---------------------------------------------------------------------------
+
+
+def _get_hassfest_config() -> Config:
+    """Get hassfest config."""
+    return Config(
+        root=Path().absolute(),
+        specific_integrations=None,
+        action="validate",
+        requirements=True,
+    )
+
+
+def _normalize_package_name(package_name: str) -> str:
+    """Normalize a package name (lowercase + dash separators)."""
+    # pipdeptree needs lowercase and dash instead of underscore or period as separator
+    return package_name.lower().replace("_", "-").replace(".", "-")
+
+
+def normalize_package_name(requirement: str) -> str:
+    """Return a normalized package name from a requirement string. Returns an empty string when the requirement doesn't match the expected pattern."""
+    # This function is also used in hassfest.
+    match = PACKAGE_REGEX.search(requirement)
+    if not match:
+        return ""
+
+    # pipdeptree needs lowercase and dash instead of underscore or period as separator
+    return _normalize_package_name(match.group(1))
+
+
+def comment_requirement(req: str) -> bool:
+    """Comment out requirement. Some don't install on all systems."""
+    return normalize_package_name(req) in EXCLUDED_REQUIREMENTS_ALL
+
+
 def has_tests(module: str) -> bool:
     """Test if a module has tests.
 
     Module format: homeassistant.components.hue
     Test if exists: tests/components/hue/__init__.py
     """
-    path = (
+    test_path = (
         Path(module.replace(".", "/").replace("homeassistant", "tests", 1))
         / "__init__.py"
     )
-    return path.exists()
+    return test_path.exists()
 
+# ---------------------------------------------------------------------------
+# Module exploration and requirement collection
+# -----------------------------------------------------------------------
 
 def explore_module(package: str, explore_children: bool) -> list[str]:
-    """Explore the modules."""
+    """Return a list of discovered submodules under 'package'."""
+    found: list[str] = []
     module = importlib.import_module(package)
 
-    found: list[str] = []
-
+    # If the module is a single-file module, it has no __path__ to explore.
     if not hasattr(module, "__path__"):
         return found
 
@@ -263,6 +331,7 @@ def explore_module(package: str, explore_children: bool) -> list[str]:
         found.append(name)
 
         if explore_children:
+            # only explore immediate children to avoid deep recursion
             found.extend(explore_module(name, False))
 
     return found
@@ -278,83 +347,56 @@ def core_requirements() -> list[str]:
 def gather_recursive_requirements(
     domain: str, seen: set[str] | None = None
 ) -> set[str]:
-    """Recursively gather requirements from a module."""
+    """Recursively gather requirements for an integration and its transitive dependencies."""
+    #Fixes:
+    #- avoids infinite recursion by tracking 'seen' domains
+    #- avoids incorrect membership checks against CONSTRAINT_BASE by using strings
+
     if seen is None:
         seen = set()
 
+    if domain in seen:
+        return set()
+
     seen.add(domain)
+
     integration = Integration(
         Path(f"homeassistant/components/{domain}"), _get_hassfest_config()
     )
     integration.load_manifest()
+
+    # integration.requirements is a list of strings; ensure we only include requirements not already present in CONSTRAINT_BASE text.
     reqs = {x for x in integration.requirements if x not in CONSTRAINT_BASE}
     for dep_domain in integration.dependencies:
-        reqs.update(gather_recursive_requirements(dep_domain, seen))
+        if dep_domain not in seen:
+            reqs.update(gather_recursive_requirements(dep_domain, seen))
     return reqs
 
 
-def _normalize_package_name(package_name: str) -> str:
-    """Normalize a package name."""
-    # pipdeptree needs lowercase and dash instead of underscore or period as separator
-    return package_name.lower().replace("_", "-").replace(".", "-")
+def process_requirements(
+    errors: list[str],
+    module_requirements: list[str],
+    package: str,
+    reqs: dict[str, list[str]],
+) -> None:
+    """Validate and register module requirements."""
 
+    # Validation rules:
+    # - no direct URLs (only PyPI entries)
+    # - requirements must be pinned with '=='
 
-def normalize_package_name(requirement: str) -> str:
-    """Return a normalized package name from a requirement string."""
-    # This function is also used in hassfest.
-    match = PACKAGE_REGEX.search(requirement)
-    if not match:
-        return ""
-
-    # pipdeptree needs lowercase and dash instead of underscore or period as separator
-    return _normalize_package_name(match.group(1))
-
-
-def comment_requirement(req: str) -> bool:
-    """Comment out requirement. Some don't install on all systems."""
-    return normalize_package_name(req) in EXCLUDED_REQUIREMENTS_ALL
-
-
-def process_action_requirement(req: str, action: str) -> str:
-    """Process requirement for a specific github action."""
-    normalized_package_name = normalize_package_name(req)
-    if normalized_package_name in OVERRIDDEN_REQUIREMENTS_ACTIONS[action]["exclude"]:
-        return f"# {req}"
-    if normalized_package_name in OVERRIDDEN_REQUIREMENTS_ACTIONS[action]["include"]:
-        return req
-    if normalized_package_name in EXCLUDED_REQUIREMENTS_ALL:
-        return f"# {req}"
-    if markers := OVERRIDDEN_REQUIREMENTS_ACTIONS[action]["markers"].get(
-        normalized_package_name, None
-    ):
-        return f"{req};{markers}"
-    return req
-
-
-def gather_modules() -> dict[str, list[str]] | None:
-    """Collect the information."""
-    reqs: dict[str, list[str]] = {}
-
-    errors: list[str] = []
-
-    gather_requirements_from_manifests(errors, reqs)
-    gather_requirements_from_modules(errors, reqs)
-
-    for value in reqs.values():
-        value = sorted(value, key=lambda name: (len(name.split(".")), name))
-
-    if errors:
-        print("******* ERROR")
-        print("Errors while importing: ", ", ".join(errors))
-        return None
-
-    return reqs
+    for req in module_requirements:
+        if "://" in req:
+            errors.append(f"{package}[Only pypi dependencies are allowed: {req}]")
+        if req.partition("==")[1] == "":
+            errors.append(f"{package}[Please pin requirement {req}, see {URL_PIN}]")
+        reqs.setdefault(req, []).append(package)
 
 
 def gather_requirements_from_manifests(
     errors: list[str], reqs: dict[str, list[str]]
 ) -> None:
-    """Gather all of the requirements from manifests."""
+    """Collect requirements from integration manifests via hassfest Integration objects."""
     config = _get_hassfest_config()
     integrations = Integration.load_dir(config.core_integrations_path, config)
     for domain in sorted(integrations):
@@ -371,7 +413,7 @@ def gather_requirements_from_manifests(
 def gather_requirements_from_modules(
     errors: list[str], reqs: dict[str, list[str]]
 ) -> None:
-    """Collect the requirements from the modules directly."""
+    """Collect the requirements from the Python modules (scripts and auth)."""
     for package in sorted(
         explore_module("homeassistant.scripts", True)
         + explore_module("homeassistant.auth", True)
@@ -379,6 +421,7 @@ def gather_requirements_from_modules(
         try:
             module = importlib.import_module(package)
         except ImportError as err:
+            # keep original behavior of reporting the import error; record package as error
             print(f"{package.replace('.', '/')}.py: {err}")
             errors.append(package)
             continue
@@ -387,32 +430,60 @@ def gather_requirements_from_modules(
             process_requirements(errors, module.REQUIREMENTS, package, reqs)
 
 
-def process_requirements(
-    errors: list[str],
-    module_requirements: list[str],
-    package: str,
-    reqs: dict[str, list[str]],
-) -> None:
-    """Process all of the requirements."""
-    for req in module_requirements:
-        if "://" in req:
-            errors.append(f"{package}[Only pypi dependencies are allowed: {req}]")
-        if req.partition("==")[1] == "":
-            errors.append(f"{package}[Please pin requirement {req}, see {URL_PIN}]")
-        reqs.setdefault(req, []).append(package)
+def gather_modules() -> dict[str, list[str]] | None:
+    """Gather all requirements and return mapping requirement -> list of modules that require it. Returns None on error (and prints a summary)."""
+    reqs: dict[str, list[str]] = {}
+
+    errors: list[str] = []
+
+    gather_requirements_from_manifests(errors, reqs)
+    gather_requirements_from_modules(errors, reqs)
+
+    # Fix sorting bug: ensure we update the dict entries with sorted lists.
+    for key in list(reqs.keys()):
+        reqs[key] = sorted(reqs[key], key=lambda name: (len(name.split(".")), name))
+
+    if errors:
+        print("******* ERROR")
+        print("Errors while importing: ", ", ".join(errors))
+        return None
+
+    return reqs
+
+
+# ---------------------------------------------------------------------------
+# Generation of requirement files
+# ---------------------------------------------------------------------------
 
 
 def generate_requirements_list(reqs: dict[str, list[str]]) -> str:
     """Generate a pip file based on requirements."""
     output = []
     for pkg, requirements in sorted(reqs.items(), key=itemgetter(0)):
+        # add comments listing which modules require this pkg
         output.extend(f"\n# {req}" for req in sorted(requirements))
 
+        # comment out packages that are not installable on all platforms
         if comment_requirement(pkg):
             output.append(f"\n# {pkg}\n")
         else:
             output.append(f"\n{pkg}\n")
     return "".join(output)
+
+
+def process_action_requirement(req: str, action: str) -> str:
+    """Process requirement for a specific github action."""
+    normalized_package_name = normalize_package_name(req)
+    overrides = OVERRIDDEN_REQUIREMENTS_ACTIONS.get(action, {"exclude": set(), "include": set(), "markers": {}})
+    if normalized_package_name in overrides["exclude"]:
+        return f"# {req}"
+    if normalized_package_name in overrides["include"]:
+        return req
+    if normalized_package_name in EXCLUDED_REQUIREMENTS_ALL:
+        return f"# {req}"
+    if markers := overrides["markers"].get(normalized_package_name):
+        return f"{req};{markers}"
+    return req
 
 
 def generate_action_requirements_list(reqs: dict[str, list[str]], action: str) -> str:
@@ -425,51 +496,24 @@ def generate_action_requirements_list(reqs: dict[str, list[str]], action: str) -
     return "".join(output)
 
 
+# Connect the generated message using "+" instead of ".append" function
 def requirements_output() -> str:
-    """Generate output for requirements."""
-    output = [
-        GENERATED_MESSAGE,
-        "-c homeassistant/package_constraints.txt\n",
-        "\n",
-        "# Home Assistant Core\n",
-    ]
-    output.append("\n".join(core_requirements()))
-    output.append("\n")
-
-    return "".join(output)
+    """Generate requirements.txt content (core + constraint reference)."""
+    return GENERATED_MESSAGE + "-c homeassistant/package_constraints.txt\n\n# Home Assistant Core\n" + "\n".join(core_requirements()) + "\n"
 
 
 def requirements_all_output(reqs: dict[str, list[str]]) -> str:
-    """Generate output for requirements_all."""
-    output = [
-        "# Home Assistant Core, full dependency set\n",
-        GENERATED_MESSAGE,
-        "-r requirements.txt\n",
-    ]
-    output.append(generate_requirements_list(reqs))
-
-    return "".join(output)
+    """Generate requirements_all.txt content."""
+    return "# Home Assistant Core, full dependency set\n" + GENERATED_MESSAGE + "-r requirements.txt\n" + generate_requirements_list(reqs)
 
 
 def requirements_all_action_output(reqs: dict[str, list[str]], action: str) -> str:
-    """Generate output for requirements_all_{action}."""
-    output = [
-        f"# Home Assistant Core, full dependency set for {action}\n",
-        GENERATED_MESSAGE,
-        "-r requirements.txt\n",
-    ]
-    output.append(generate_action_requirements_list(reqs, action))
-
-    return "".join(output)
+    """Generate requirements_all_{action}.txt content for a specific action."""
+    return f"# Home Assistant Core, full dependency set for {action}\n" + GENERATED_MESSAGE + "-r requirements.txt\n" + generate_action_requirements_list(reqs, action)
 
 
 def requirements_test_all_output(reqs: dict[str, list[str]]) -> str:
-    """Generate output for test_requirements."""
-    output = [
-        "# Home Assistant tests, full dependency set\n",
-        GENERATED_MESSAGE,
-        "-r requirements_test.txt\n",
-    ]
+    """Generate requirements_test_all.txt (only include requirements that are needed for tests)."""
 
     filtered = {
         requirement: modules
@@ -483,9 +527,7 @@ def requirements_test_all_output(reqs: dict[str, list[str]]) -> str:
             for mdl in modules
         )
     }
-    output.append(generate_requirements_list(filtered))
-
-    return "".join(output)
+    return "# Home Assistant tests, full dependency set\n" + GENERATED_MESSAGE + "-r requirements_test.txt\n" + generate_requirements_list(filtered)
 
 
 def requirements_pre_commit_output() -> str:
@@ -502,50 +544,38 @@ def requirements_pre_commit_output() -> str:
                 pkg = MAP_HOOK_ID_TO_PACKAGE.get(hook["id"]) or hook["id"]
                 reqs.append(f"{pkg}=={rev.lstrip('v')}")
                 reqs.extend(x for x in hook.get("additional_dependencies", ()))
-    output = [
-        f"# Automatically generated "
-        f"from {source} by {Path(__file__).name}, do not edit",
-        "",
-    ]
-    output.extend(sorted(reqs))
-    return "\n".join(output) + "\n"
+    header = f"# Automatically generated from {source} by {Path(__file__).name}, do not edit\n\n"
+    return header + "\n".join(sorted(reqs)) + "\n"
 
 
 def gather_constraints() -> str:
     """Construct output for constraint file."""
-    return (
-        GENERATED_MESSAGE
-        + "\n".join(
-            [
-                *sorted(
-                    {
-                        *core_requirements(),
-                        *gather_recursive_requirements("default_config"),
-                        *gather_recursive_requirements("mqtt"),
-                    },
-                    key=str.lower,
-                ),
-                "",
-            ]
-        )
-        + CONSTRAINT_BASE
+    items = sorted(
+        {
+            *core_requirements(),
+            *gather_recursive_requirements("default_config"),
+            *gather_recursive_requirements("mqtt"),
+        },
+        key=str.lower,
     )
+    return GENERATED_MESSAGE + "\n".join([*items, ""]) + CONSTRAINT_BASE
 
+
+# ---------------------------------------------------------------------------
+# Diff helper and CLI orchestration
+# ---------------------------------------------------------------------------
 
 def diff_file(filename: str, content: str) -> list[str]:
-    """Diff a file."""
-    return list(
-        difflib.context_diff(
-            [f"{line}\n" for line in Path(filename).read_text().split("\n")],
-            [f"{line}\n" for line in content.split("\n")],
-            filename,
-            "generated",
-        )
-    )
+    """Return context diff between an existing file and generated content (as list of lines)."""
+    old = Path(filename).read_text().split("\n")
+    new = content.split("\n")
+    return list(difflib.context_diff([f"{l}\n" for l in old], [f"{l}\n" for l in new], filename, "generated"))
 
 
 def main(validate: bool, ci: bool) -> int:
-    """Run the script."""
+    """Main entry point for the script."""
+    # validate = True: compare generated files to disk and return non-zero on mismatch
+    # ci = True: also generate per-action requirements files
     if not Path("requirements_all.txt").is_file():
         print("Run this from HA root dir")
         return 1
@@ -555,64 +585,40 @@ def main(validate: bool, ci: bool) -> int:
     if data is None:
         return 1
 
-    reqs_file = requirements_output()
-    reqs_all_file = requirements_all_output(data)
-    reqs_all_action_files = {
-        action: requirements_all_action_output(data, action)
-        for action in OVERRIDDEN_REQUIREMENTS_ACTIONS
+    # Generate outputs
+    outputs = {
+        "requirements.txt": requirements_output(),
+        "requirements_all.txt": requirements_all_output(data),
+        "requirements_test_pre_commit.txt": requirements_pre_commit_output(),
+        "requirements_test_all.txt": requirements_test_all_output(data),
+        "homeassistant/package_constraints.txt": gather_constraints(),
     }
-    reqs_test_all_file = requirements_test_all_output(data)
-    # Always calling requirements_pre_commit_output is intentional to ensure
-    # the code is called by the pre-commit hooks.
-    reqs_pre_commit_file = requirements_pre_commit_output()
-    constraints = gather_constraints()
 
-    files = [
-        ("requirements.txt", reqs_file),
-        ("requirements_all.txt", reqs_all_file),
-        ("requirements_test_pre_commit.txt", reqs_pre_commit_file),
-        ("requirements_test_all.txt", reqs_test_all_file),
-        ("homeassistant/package_constraints.txt", constraints),
-    ]
     if ci:
-        files.extend(
-            (f"requirements_all_{action}.txt", reqs_all_file)
-            for action, reqs_all_file in reqs_all_action_files.items()
-        )
+        for action in OVERRIDDEN_REQUIREMENTS_ACTIONS:
+            outputs[f"requirements_all_{action}.txt"] = requirements_all_action_output(data, action)
 
     if validate:
         errors = []
 
-        for filename, content in files:
+        for filename, content in outputs.items():
             diff = diff_file(filename, content)
             if diff:
                 errors.append("".join(diff))
 
         if errors:
-            print("ERROR - FOUND THE FOLLOWING DIFFERENCES")
-            print()
-            print()
+            print("ERROR - FOUND THE FOLLOWING DIFFERENCES\n")
             print("\n\n".join(errors))
-            print()
-            print("Please run python3 -m script.gen_requirements_all")
+            print("\nPlease run python3 -m script.gen_requirements_all")
             return 1
 
         return 0
 
-    for filename, content in files:
+    #Write files
+    for filename, content in outputs.items():
         Path(filename).write_text(content)
 
     return 0
-
-
-def _get_hassfest_config() -> Config:
-    """Get hassfest config."""
-    return Config(
-        root=Path().absolute(),
-        specific_integrations=None,
-        action="validate",
-        requirements=True,
-    )
 
 
 if __name__ == "__main__":
