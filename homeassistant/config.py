@@ -7,7 +7,7 @@ from collections import OrderedDict
 from collections.abc import Callable, Hashable, Iterable, Sequence
 from contextlib import suppress
 from dataclasses import dataclass
-from enum import StrEnum
+from enum import StrEnum, Enum
 from functools import partial, reduce
 import logging
 import operator
@@ -15,7 +15,7 @@ import os
 from pathlib import Path
 import shutil
 from types import ModuleType
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Hashable, Iterable, List, Optional
 
 from awesomeversion import AwesomeVersion
 import voluptuous as vol
@@ -202,6 +202,39 @@ def _write_default_config(config_dir: str) -> bool:
         return False
     return True
 
+# Map (domain, option_key) -> guidance / replacement text
+_DEPRECATED_CONFIG_OPTIONS: dict[tuple[str, str], str] = {
+    # Example: sensor.old_option is deprecated, use sensor.new_option instead
+    ("sensor", "old_option"): "Use 'new_option' under 'sensor' instead.",
+    # Add more entries here as needed
+    # ("automation", "initial_state"): "Use 'enabled' instead of 'initial_state'.",
+}
+
+def _log_deprecated_config(
+    hass: HomeAssistant, config: dict
+) -> None:
+    """Log warnings for deprecated configuration options.
+
+    Looks up known deprecated options in the loaded configuration and emits
+    clear warnings with guidance for replacements.
+    """
+    for domain, domain_cfg in config.items():
+        # Only inspect domain configs that are mappings (most domains are)
+        if not isinstance(domain_cfg, dict):
+            continue
+
+        for key in domain_cfg:
+            replacement = _DEPRECATED_CONFIG_OPTIONS.get((domain, key))
+            if not replacement:
+                continue
+
+            _LOGGER.warning(
+                "Configuration option '%s' in '%s' is deprecated and will be "
+                "removed in a future release: %s",
+                key,
+                domain,
+                replacement,
+            )
 
 async def async_hass_config_yaml(hass: HomeAssistant) -> dict:
     """Load YAML from a Home Assistant configuration file.
@@ -257,8 +290,10 @@ async def async_hass_config_yaml(hass: HomeAssistant) -> dict:
         )
         core_config[CONF_PACKAGES] = {}
 
-    return config
+    # NEW: warn about deprecated config entries
+    _log_deprecated_config(hass, config)
 
+    return config
 
 def load_yaml_config_file(
     config_path: str, secrets: Secrets | None = None
@@ -453,59 +488,132 @@ def stringify_invalid(
     domain: str,
     config: dict,
     link: str | None,
-    max_sub_error_length: int,
+    max_sub_error_length: int = MAX_VALIDATION_ERROR_ITEM_LENGTH,
 ) -> str:
-    """Stringify voluptuous.Invalid.
+    """Format a voluptuous.Invalid into a rich, actionable error string.
 
-    This is an alternative to the custom __str__ implemented in
-    voluptuous.error.Invalid. The modifications are:
-    - Format the path delimited by -> instead of @data[]
-    - Prefix with domain, file and line of the error
-    - Suffix with a link to the documentation
-    - Give a more user friendly output for unknown options
-    - Give a more user friendly output for missing options
+    Compared to the previous implementation, this:
+
+    * Categorizes the error (undefined variable / invalid schema / value error).
+    * Shows the config path and offending value.
+    * Adds a short, actionable hint where possible.
+    * Keeps the familiar 'Invalid config for ...' prefix.
     """
-    if "." in domain:
-        integration_domain, _, platform_domain = domain.partition(".")
-        message_prefix = (
-            f"Invalid config for '{platform_domain}' from integration "
-            f"'{integration_domain}'"
-        )
-    else:
-        message_prefix = f"Invalid config for '{domain}'"
-    if domain != HOMEASSISTANT_DOMAIN and link:
-        message_suffix = f", please check the docs at {link}"
-    else:
-        message_suffix = ""
-    if annotation := find_annotation(config, exc.path):
-        message_prefix += f" at {_relpath(hass, annotation[0])}, line {annotation[1]}"
-    path = "->".join(str(m) for m in exc.path)
-    if exc.error_message == "extra keys not allowed":
-        return (
-            f"{message_prefix}: '{exc.path[-1]}' is an invalid option for '{domain}', "
-            f"check: {path}{message_suffix}"
-        )
-    if exc.error_message == "required key not provided":
-        return (
-            f"{message_prefix}: required key '{exc.path[-1]}' not provided"
-            f"{message_suffix}"
-        )
-    # This function is an alternative to the stringification done by
-    # vol.Invalid.__str__, so we need to call Exception.__str__ here
-    # instead of str(exc)
-    output = Exception.__str__(exc)
-    if error_type := exc.error_type:
-        output += " for " + error_type
-    offending_item_summary = repr(_get_by_path(config, exc.path))
-    if len(offending_item_summary) > max_sub_error_length:
-        offending_item_summary = (
-            f"{offending_item_summary[: max_sub_error_length - 3]}..."
-        )
-    return (
-        f"{message_prefix}: {output} '{path}', got {offending_item_summary}"
-        f"{message_suffix}"
-    )
 
+    # Preserve existing human message from voluptuous.
+    base_message = getattr(exc, "error_message", "") or Exception.__str__(exc)
+
+    category = _classify_validation_error(exc)
+    path_str = _format_path(exc.path)
+    offending_item = _nested_getitem(config, list(exc.path))
+
+    if offending_item is None:
+        offending_summary = "None"
+    else:
+        offending_summary = repr(offending_item)
+
+    if len(offending_summary) > max_sub_error_length:
+        offending_summary = (
+            offending_summary[: max_sub_error_length - 3] + "..."
+        )
+
+    # Category-specific header + hint
+    if category == ValidationCategory.UNDEFINED_VARIABLE:
+        header = f"Invalid config for '{domain}': undefined variable in template."
+        hint = (
+            "Ensure all template variables are defined and that referenced "
+            "entities/attributes exist. Consider using `is defined` checks."
+        )
+    elif category == ValidationCategory.INVALID_SCHEMA:
+        header = f"Invalid config for '{domain}': invalid schema."
+        hint = (
+            "Check that all required keys are present, option names are spelled "
+            "correctly, and values follow the documented structure."
+        )
+    elif category == ValidationCategory.VALUE_ERROR:
+        header = f"Invalid config for '{domain}': invalid value."
+        hint = (
+            "Verify that the value matches the expected type or format "
+            "(for example, a number, boolean, or correctly formatted template)."
+        )
+    else:
+        header = f"Invalid config for '{domain}': {base_message}"
+        hint = None
+
+    lines: list[str] = [header]
+
+    # Only add details line if we didn't already embed base_message in header
+    if category != ValidationCategory.UNKNOWN:
+        lines.append(f"  • Details: {base_message}")
+
+    if path_str:
+        lines.append(f"  • Location: {path_str}")
+
+    # Always show offending value, including None, so tests can assert on it.
+    lines.append(f"  • Offending value: {offending_summary}")
+
+    if hint:
+        lines.append(f"  • Hint: {hint}")
+
+    if link:
+        # Preserve the existing behavior of pointing users to the docs.
+        lines.append(f"  • Documentation: {link}")
+
+    return "\n".join(lines)
+
+class ValidationCategory(str, Enum):
+    """High-level category of validation error."""
+
+    UNDEFINED_VARIABLE = "undefined_variable"
+    INVALID_SCHEMA = "invalid_schema"
+    VALUE_ERROR = "value_error"
+    UNKNOWN = "unknown"
+
+def _nested_getitem(data: Any, path: List[Hashable]) -> Optional[Any]:
+    """Return the value at `path` inside `data`, or None if not available."""
+    for item_index in path:
+        try:
+            data = data[item_index]
+        except (KeyError, IndexError, TypeError):
+            return None
+    return data
+
+def _classify_validation_error(exc: vol.Invalid) -> ValidationCategory:
+    """Classify a voluptuous Invalid into a coarse category."""
+    message = getattr(exc, "error_message", "") or str(exc)
+    lower = message.lower()
+
+    # Undefined Jinja / template variable style errors.
+    if "undefinederror" in lower or "is undefined" in lower:
+        return ValidationCategory.UNDEFINED_VARIABLE
+    if "has no attribute" in lower and "undefined" in lower:
+        return ValidationCategory.UNDEFINED_VARIABLE
+
+    # Schema-level: missing/extra keys, wrong type of container, etc.
+    if "required key not provided" in lower:
+        return ValidationCategory.INVALID_SCHEMA
+    if "extra keys not allowed" in lower:
+        return ValidationCategory.INVALID_SCHEMA
+    if "not a valid value" in lower or "not a valid option" in lower:
+        return ValidationCategory.INVALID_SCHEMA
+    if "expected dict" in lower or "expected list" in lower:
+        return ValidationCategory.INVALID_SCHEMA
+
+    # Generic value error (wrong type / format).
+    if "expected " in lower:
+        return ValidationCategory.VALUE_ERROR
+
+    return ValidationCategory.UNKNOWN
+
+def _format_path(path: Iterable[Hashable]) -> str:
+    """Format voluptuous path list as a human-friendly breadcrumb."""
+    parts: list[str] = []
+    for component in path:
+        if isinstance(component, int):
+            parts.append(f"[{component}]")
+        else:
+            parts.append(str(component))
+    return " → ".join(parts)
 
 def humanize_error(
     hass: HomeAssistant,
@@ -747,8 +855,42 @@ async def merge_packages_config(
                 merge_list = _identify_config_schema(component) == "list"
 
             if merge_list:
+                # Existing items already present in the main config
+                existing_items = cv.ensure_list(config.get(comp_name))
+
+                # Items coming from this package
+                package_items = cv.ensure_list(comp_conf)
+
+                valid_package_items: list[Any] = []
+                for idx, item in enumerate(package_items):
+                    # Treat None as "no config" and silently ignore it
+                    if item is None:
+                        continue
+
+                    # For list-based integrations in packages, we expect each item
+                    # to be a mapping (dict-like). Anything else is very likely
+                    # a configuration error.
+                    if not isinstance(item, dict):
+                        _log_pkg_error(
+                            hass,
+                            pack_name,
+                            comp_name,
+                            config,
+                            (
+                                f"integration '{comp_name}' in package '{pack_name}' "
+                                f"has invalid list item at index {idx}: expected a dict, "
+                                f"got {type(item).__name__}"
+                            ),
+                        )
+                        # Skip this invalid list item
+                        continue
+
+                    valid_package_items.append(item)
+
+                # Keep the existing semantics of remove_falsy, but only with
+                # valid items from the package.
                 config[comp_name] = cv.remove_falsy(
-                    cv.ensure_list(config.get(comp_name)) + cv.ensure_list(comp_conf)
+                    existing_items + valid_package_items
                 )
                 continue
 
