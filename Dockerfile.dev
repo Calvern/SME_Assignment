@@ -1,13 +1,21 @@
 FROM mcr.microsoft.com/vscode/devcontainers/base:debian
 
+# Use /bin/bash for scripting to enable more complex shell operations
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
+# -------------------------------------------------------------------------
+# SECTION 1: System Dependencies and Tools Installation
+# This section installs necessary libraries for Home Assistant and its components
+# like bluez (bluetooth), ffmpeg (media), and libudev (device interaction).
+# -------------------------------------------------------------------------
 RUN \
+    # Update package lists
     apt-get update \
     && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-        # Additional library needed by some tests and accordingly by VScode Tests Discovery
+        # Dependencies for Bluetooth (bluez) and media (ffmpeg) integration
         bluez \
         ffmpeg \
+        # Libraries required for device interaction, audio/video processing, and network sniffing
         libudev-dev \
         libavformat-dev \
         libavcodec-dev \
@@ -17,45 +25,66 @@ RUN \
         libswresample-dev \
         libavfilter-dev \
         libpcap-dev \
+        # Compression and parsing libraries
         libturbojpeg0 \
         libyaml-dev \
         libxml2 \
+        # Core build tools
         git \
         cmake \
         autoconf \
+    # Clean up APT cache to reduce image size
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
-# Add go2rtc binary
+# Add go2rtc binary for real-time video streaming support
 COPY --from=ghcr.io/alexxit/go2rtc:latest /usr/local/bin/go2rtc /bin/go2rtc
 
+# -------------------------------------------------------------------------
+# SECTION 2: Tool Setup and Virtual Environment
+# Sets up the uv package manager and creates a dedicated Python virtual environment.
+# -------------------------------------------------------------------------
 WORKDIR /usr/src
 
+# Copy uv binary (fast package manager)
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 
+# Switch to the non-root user 'vscode' as recommended for dev containers
 USER vscode
 
+# Install the correct Python version as specified in .python-version
 COPY .python-version ./
 RUN uv python install
 
+# Define the location of the virtual environment
 ENV VIRTUAL_ENV="/home/vscode/.local/ha-venv"
+# Create and activate the virtual environment
 RUN uv venv $VIRTUAL_ENV
 ENV PATH="$VIRTUAL_ENV/bin:$PATH"
 
+# -------------------------------------------------------------------------
+# SECTION 3: Install Home Assistant Dependencies
+# Installs hass-release and the core project dependencies.
+# -------------------------------------------------------------------------
 WORKDIR /tmp
 
-# Setup hass-release
+# Setup hass-release for version management
 RUN git clone --depth 1 https://github.com/home-assistant/hass-release ~/hass-release \
-    && uv pip install -e ~/hass-release/
+    && uv pip install -e /home/vscode/hass-release/
 
-# Install Python dependencies from requirements
+
+
+# Install main requirements
 COPY requirements.txt ./
 COPY homeassistant/package_constraints.txt homeassistant/package_constraints.txt
 RUN uv pip install -r requirements.txt
+
+# Install test requirements
 COPY requirements_test.txt requirements_test_pre_commit.txt ./
 RUN uv pip install -r requirements_test.txt
 
+# Final working directory for code development (mounted from host)
 WORKDIR /workspaces
 
-# Set the default shell to bash instead of sh
+# Set the default shell for the container session
 ENV SHELL=/bin/bash
