@@ -24,6 +24,7 @@ import enum
 import functools
 import inspect
 import logging
+import platform
 import re
 import threading
 import time
@@ -246,6 +247,48 @@ def is_callback_check_partial(target: Callable[..., Any]) -> bool:
     while isinstance(check_target, functools.partial):
         check_target = check_target.func
     return is_callback(check_target)
+
+
+def log_execution_time(func: Callable[..., Any]) -> Callable[..., Any]:
+    """Decorator to log the execution time of a function."""
+
+    @functools.wraps(func)
+    async def wrapper(*args: Any, **kwargs: Any) -> Any:
+        start_timer = time.monotonic()
+
+        # Use Home Assistant's dt_util for the display time
+        current_time = dt_util.now().strftime("%Y-%m-%d %H:%M:%S")
+        system_platform = platform.platform()
+
+        _LOGGER.info(
+            "Start running %s on %s at %s",
+            func.__name__,
+            system_platform,
+            current_time,
+        )
+
+        # 2. Run the actual function
+        try:
+            result = await func(*args, **kwargs)
+        except Exception as err:
+            # Log the duration even if it fails!
+            duration = time.monotonic() - start_timer
+            _LOGGER.error(
+                "Failed %s after %.2f seconds. Error: %s", func.__name__, duration, err
+            )
+            raise
+
+        # 3. Capture end data and log duration
+        duration = time.monotonic() - start_timer
+        _LOGGER.info(
+            "Finished %s successfully. Duration: %.2f seconds",
+            func.__name__,
+            duration,
+        )
+
+        return result
+
+    return wrapper
 
 
 class _Hass(threading.local):
@@ -510,6 +553,7 @@ class HomeAssistant:
         await self._stopped.wait()
         return self.exit_code
 
+    @log_execution_time
     async def async_start(self) -> None:
         """Finalize startup from inside the event loop.
 
@@ -1064,6 +1108,7 @@ class HomeAssistant:
             self.async_stop(), self.loop
         )
 
+    @log_execution_time
     async def async_stop(self, exit_code: int = 0, *, force: bool = False) -> None:
         """Stop Home Assistant and shuts down all threads.
 
@@ -1073,21 +1118,47 @@ class HomeAssistant:
 
         This method is a coroutine.
         """
+        # 0. Validation Check
+        if not self._can_stop(force):
+            return
+
+        # Stage 1 - Run shutdown jobs
+        await self._async_shutdown_jobs()
+
+        # Stage 2 - Stop integrations
+        running_tasks = await self._async_stop_integrations(exit_code)
+
+        # Stage 3 - Final write
+        await self._async_final_write()
+
+        # Stage 4 - Close
+        await self._async_close(running_tasks)
+
+        self.set_state(CoreState.stopped)
+        self.import_executor.shutdown()
+
+        if self._stopped is not None:
+            self._stopped.set()
+
+    def _can_stop(self, force: bool) -> bool:
+        """Validate if the stop request should proceed."""
         if not force:
             # Some tests require async_stop to run,
             # regardless of the state of the loop.
             if self.state is CoreState.not_running:  # just ignore
-                return
+                return False
             if self.state in [CoreState.stopping, CoreState.final_write]:
                 _LOGGER.info("Additional call to async_stop was ignored")
-                return
+                return False
             if self.state is CoreState.starting:
                 # This may not work
                 _LOGGER.warning(
                     "Stopping Home Assistant before startup has completed may fail"
                 )
+        return True
 
-        # Stage 1 - Run shutdown jobs
+    async def _async_shutdown_jobs(self) -> None:
+        """Stage 1: Run shutdown jobs."""
         try:
             async with self.timeout.async_timeout(STOPPING_STAGE_SHUTDOWN_TIMEOUT):
                 tasks: list[asyncio.Future[Any]] = []
@@ -1105,8 +1176,10 @@ class HomeAssistant:
             )
             self._async_log_running_tasks("run shutdown jobs")
 
-        # Stage 2 - Stop integrations
-
+    async def _async_stop_integrations(
+        self, exit_code: int
+    ) -> set[asyncio.Future[Any]]:
+        """Stage 2: Stop integrations."""
         # Keep holding the reference to the tasks but do not allow them
         # to block shutdown. Only tasks created after this point will
         # be waited for.
@@ -1135,7 +1208,10 @@ class HomeAssistant:
             )
             self._async_log_running_tasks("stop integrations")
 
-        # Stage 3 - Final write
+        return running_tasks
+
+    async def _async_final_write(self) -> None:
+        """Stage 3: Final write."""
         self.set_state(CoreState.final_write)
         self.bus.async_fire_internal(EVENT_HOMEASSISTANT_FINAL_WRITE)
         try:
@@ -1148,7 +1224,7 @@ class HomeAssistant:
             )
             self._async_log_running_tasks("final write")
 
-        # Stage 4 - Close
+    async def _async_close(self, running_tasks: set[asyncio.Future[Any]]) -> None:
         self.set_state(CoreState.not_running)
         self.bus.async_fire_internal(EVENT_HOMEASSISTANT_CLOSE)
 
@@ -1197,12 +1273,6 @@ class HomeAssistant:
                 " continue"
             )
             self._async_log_running_tasks("close")
-
-        self.set_state(CoreState.stopped)
-        self.import_executor.shutdown()
-
-        if self._stopped is not None:
-            self._stopped.set()
 
     def _cancel_cancellable_timers(self) -> None:
         """Cancel timer handles marked as cancellable."""
@@ -2426,7 +2496,14 @@ class SupportsResponse(enum.StrEnum):
 class Service:
     """Representation of a callable service."""
 
-    __slots__ = ["domain", "job", "schema", "service", "supports_response"]
+    __slots__ = [
+        "description_placeholders",
+        "domain",
+        "job",
+        "schema",
+        "service",
+        "supports_response",
+    ]
 
     def __init__(
         self,
@@ -2443,11 +2520,13 @@ class Service:
         context: Context | None = None,
         supports_response: SupportsResponse = SupportsResponse.NONE,
         job_type: HassJobType | None = None,
+        description_placeholders: Mapping[str, str] | None = None,
     ) -> None:
         """Initialize a service."""
         self.job = HassJob(func, f"service {domain}.{service}", job_type=job_type)
         self.schema = schema
         self.supports_response = supports_response
+        self.description_placeholders = description_placeholders
 
 
 class ServiceCall:
@@ -2590,6 +2669,8 @@ class ServiceRegistry:
         schema: VolSchemaType | None = None,
         supports_response: SupportsResponse = SupportsResponse.NONE,
         job_type: HassJobType | None = None,
+        *,
+        description_placeholders: Mapping[str, str] | None = None,
     ) -> None:
         """Register a service.
 
@@ -2599,7 +2680,13 @@ class ServiceRegistry:
         """
         self._hass.verify_event_loop_thread("hass.services.async_register")
         self._async_register(
-            domain, service, service_func, schema, supports_response, job_type
+            domain,
+            service,
+            service_func,
+            schema,
+            supports_response,
+            job_type,
+            description_placeholders,
         )
 
     @callback
@@ -2617,6 +2704,7 @@ class ServiceRegistry:
         schema: VolSchemaType | None = None,
         supports_response: SupportsResponse = SupportsResponse.NONE,
         job_type: HassJobType | None = None,
+        description_placeholders: Mapping[str, str] | None = None,
     ) -> None:
         """Register a service.
 
@@ -2633,6 +2721,7 @@ class ServiceRegistry:
             service,
             supports_response=supports_response,
             job_type=job_type,
+            description_placeholders=description_placeholders,
         )
 
         if domain in self._services:
